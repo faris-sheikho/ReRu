@@ -43,3 +43,14 @@ fn responds_to_multiple_pings_on_one_connection() {
     stream.write_all(&command(&[b"PING"])).unwrap();
     read_exact_response(&mut stream, b"+PONG\r\n");
 }
+
+#[test]
+fn handles_clients_while_another_connection_is_idle() {
+    let server = common::Server::start();
+    let mut idle = server.connect().unwrap();
+    let mut active = server.connect().unwrap();
+    active.write_all(&command(&[b"PING"])).unwrap();
+    read_exact_response(&mut active, b"+PONG\r\n");
+    idle.write_all(&command(&[b"PING"])).unwrap();
+    read_exact_response(&mut idle, b"+PONG\r\n");
+}

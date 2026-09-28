@@ -29,9 +29,12 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     eprintln!("ReRu listening on 127.0.0.1:{port}");
     for stream in listener.incoming() {
-        if let Err(error) = handle_client(stream?) {
-            eprintln!("client error: {error}");
-        }
+        let stream = stream?;
+        std::thread::spawn(move || {
+            if let Err(error) = handle_client(stream) {
+                eprintln!("client error: {error}");
+            }
+        });
     }
     Ok(())
 }
