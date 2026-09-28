@@ -3,7 +3,7 @@ mod protocol;
 use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 enum Value {
@@ -16,7 +16,12 @@ struct Entry {
     expires_at: Option<Instant>,
 }
 
-type Store = Arc<Mutex<HashMap<Vec<u8>, Entry>>>;
+struct SharedStore {
+    entries: Mutex<HashMap<Vec<u8>, Entry>>,
+    changed: Condvar,
+}
+
+type Store = Arc<SharedStore>;
 
 fn remove_expired(store: &mut HashMap<Vec<u8>, Entry>, key: &[u8]) {
     if store.get(key).is_some_and(|entry| {
@@ -75,6 +80,35 @@ fn list_range(items: &[Vec<u8>], start: i64, stop: i64) -> Vec<u8> {
     }
 }
 
+fn try_blpop(entries: &mut HashMap<Vec<u8>, Entry>, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
+    for key in keys {
+        remove_expired(entries, key);
+        match entries.get_mut(key) {
+            Some(Entry {
+                value: Value::List(items),
+                ..
+            }) => {
+                let value = items.remove(0);
+                if items.is_empty() {
+                    entries.remove(key);
+                }
+                return Some(protocol::array(&[key.clone(), value]));
+            }
+            Some(Entry {
+                value: Value::String(_),
+                ..
+            }) => {
+                return Some(
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                );
+            }
+            None => {}
+        }
+    }
+    None
+}
+
 fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     while let Some(command) = protocol::read_command(&mut reader)? {
@@ -92,7 +126,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             } else {
                 match set_expiry(&command) {
                     Ok(expires_at) => {
-                        store.lock().unwrap().insert(
+                        store.entries.lock().unwrap().insert(
                             command[1].clone(),
                             Entry {
                                 value: Value::String(command[2].clone()),
@@ -108,7 +142,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             if command.len() != 2 {
                 protocol::error("wrong number of arguments for 'get' command")
             } else {
-                let mut store = store.lock().unwrap();
+                let mut store = store.entries.lock().unwrap();
                 remove_expired(&mut store, &command[1]);
                 match store.get(&command[1]).map(|entry| &entry.value) {
                     Some(Value::String(value)) => protocol::bulk(value),
@@ -123,7 +157,8 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             if command.len() < 3 {
                 protocol::error("wrong number of arguments for 'rpush' command")
             } else {
-                let mut store = store.lock().unwrap();
+                let changed = &store.changed;
+                let mut store = store.entries.lock().unwrap();
                 remove_expired(&mut store, &command[1]);
                 match store.get_mut(&command[1]) {
                     Some(Entry {
@@ -131,6 +166,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         ..
                     }) => {
                         items.extend_from_slice(&command[2..]);
+                        changed.notify_all();
                         format!(":{}\r\n", items.len()).into_bytes()
                     }
                     Some(Entry {
@@ -146,6 +182,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                                 expires_at: None,
                             },
                         );
+                        changed.notify_all();
                         format!(":{}\r\n", command.len() - 2).into_bytes()
                     }
                 }
@@ -161,7 +198,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 });
                 match indexes {
                     [Some(start), Some(stop)] => {
-                        let mut store = store.lock().unwrap();
+                        let mut store = store.entries.lock().unwrap();
                         remove_expired(&mut store, &command[1]);
                         match store.get(&command[1]).map(|entry| &entry.value) {
                             Some(Value::List(items)) => list_range(items, start, stop),
@@ -176,7 +213,8 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             if command.len() < 3 {
                 protocol::error("wrong number of arguments for 'lpush' command")
             } else {
-                let mut store = store.lock().unwrap();
+                let changed = &store.changed;
+                let mut store = store.entries.lock().unwrap();
                 remove_expired(&mut store, &command[1]);
                 match store.get_mut(&command[1]) {
                     Some(Entry {
@@ -184,6 +222,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         ..
                     }) => {
                         items.splice(0..0, command[2..].iter().rev().cloned());
+                        changed.notify_all();
                         format!(":{}\r\n", items.len()).into_bytes()
                     }
                     Some(Entry {
@@ -199,6 +238,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                                 expires_at: None,
                             },
                         );
+                        changed.notify_all();
                         format!(":{}\r\n", command.len() - 2).into_bytes()
                     }
                 }
@@ -207,7 +247,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             if command.len() != 2 {
                 protocol::error("wrong number of arguments for 'llen' command")
             } else {
-                let mut store = store.lock().unwrap();
+                let mut store = store.entries.lock().unwrap();
                 remove_expired(&mut store, &command[1]);
                 match store.get(&command[1]).map(|entry| &entry.value) {
                     Some(Value::List(items)) => format!(":{}\r\n", items.len()).into_bytes(),
@@ -232,7 +272,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 match count {
                     None => protocol::error("value is not an integer or out of range"),
                     Some(count) => {
-                        let mut store = store.lock().unwrap();
+                        let mut store = store.entries.lock().unwrap();
                         remove_expired(&mut store, &command[1]);
                         match store.get_mut(&command[1]) {
                             Some(Entry { value: Value::List(items), .. }) => {
@@ -255,6 +295,21 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                             None => b"$-1\r\n".to_vec(),
                         }
                     }
+                }
+            }
+        } else if command[0].eq_ignore_ascii_case(b"BLPOP") {
+            if command.len() < 3 {
+                protocol::error("wrong number of arguments for 'blpop' command")
+            } else if command.last().is_none_or(|timeout| timeout != b"0") {
+                protocol::error("nonzero timeout is not implemented yet")
+            } else {
+                let keys = &command[1..command.len() - 1];
+                let mut entries = store.entries.lock().unwrap();
+                loop {
+                    if let Some(response) = try_blpop(&mut entries, keys) {
+                        break response;
+                    }
+                    entries = store.changed.wait(entries).unwrap();
                 }
             }
         } else {
@@ -281,7 +336,10 @@ fn main() -> io::Result<()> {
     };
 
     let listener = TcpListener::bind(("127.0.0.1", port))?;
-    let store: Store = Arc::new(Mutex::new(HashMap::new()));
+    let store: Store = Arc::new(SharedStore {
+        entries: Mutex::new(HashMap::new()),
+        changed: Condvar::new(),
+    });
     eprintln!("ReRu listening on 127.0.0.1:{port}");
     for stream in listener.incoming() {
         let stream = stream?;

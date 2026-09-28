@@ -311,3 +311,39 @@ fn lpop_count_returns_multiple_items() {
     stream.write_all(&command(&[b"LLEN", b"items"])).unwrap();
     read_exact_response(&mut stream, b":0\r\n");
 }
+
+#[test]
+fn blpop_waits_for_a_push_from_another_client() {
+    let server = common::Server::start();
+    let mut blocked = server.connect().unwrap();
+    let mut writer = server.connect().unwrap();
+    blocked
+        .write_all(&command(&[b"BLPOP", b"items", b"0"]))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    writer
+        .write_all(&command(&[b"RPUSH", b"items", b"hello"]))
+        .unwrap();
+    read_exact_response(&mut writer, b":1\r\n");
+    read_exact_response(&mut blocked, b"*2\r\n$5\r\nitems\r\n$5\r\nhello\r\n");
+    writer.write_all(&command(&[b"LLEN", b"items"])).unwrap();
+    read_exact_response(&mut writer, b":0\r\n");
+}
+
+#[test]
+fn blpop_prefers_the_first_nonempty_key() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream
+        .write_all(&command(&[b"RPUSH", b"second", b"b"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":1\r\n");
+    stream
+        .write_all(&command(&[b"RPUSH", b"first", b"a"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":1\r\n");
+    stream
+        .write_all(&command(&[b"BLPOP", b"first", b"second", b"0"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*2\r\n$5\r\nfirst\r\n$1\r\na\r\n");
+}
