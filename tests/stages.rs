@@ -1,7 +1,33 @@
 mod common;
 
+use std::io::{Read, Write};
+
+fn command(parts: &[&[u8]]) -> Vec<u8> {
+    let mut data = format!("*{}\r\n", parts.len()).into_bytes();
+    for part in parts {
+        data.extend(format!("${}\r\n", part.len()).as_bytes());
+        data.extend(*part);
+        data.extend(b"\r\n");
+    }
+    data
+}
+
+fn read_exact_response(stream: &mut std::net::TcpStream, expected: &[u8]) {
+    let mut actual = vec![0; expected.len()];
+    stream.read_exact(&mut actual).unwrap();
+    assert_eq!(actual, expected);
+}
+
 #[test]
 fn binds_to_a_port() {
     let server = common::Server::start();
     assert!(server.connect().is_ok());
+}
+
+#[test]
+fn responds_to_ping() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream.write_all(&command(&[b"PING"])).unwrap();
+    read_exact_response(&mut stream, b"+PONG\r\n");
 }

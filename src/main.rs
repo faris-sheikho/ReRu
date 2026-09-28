@@ -1,5 +1,20 @@
-use std::io;
-use std::net::TcpListener;
+mod protocol;
+
+use std::io::{self, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
+
+fn handle_client(mut stream: TcpStream) -> io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    if let Some(command) = protocol::read_command(&mut reader)? {
+        let response = if command[0].eq_ignore_ascii_case(b"PING") {
+            b"+PONG\r\n".to_vec()
+        } else {
+            protocol::error("unknown command")
+        };
+        stream.write_all(&response)?;
+    }
+    Ok(())
+}
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -14,7 +29,9 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     eprintln!("ReRu listening on 127.0.0.1:{port}");
     for stream in listener.incoming() {
-        stream?;
+        if let Err(error) = handle_client(stream?) {
+            eprintln!("client error: {error}");
+        }
     }
     Ok(())
 }
