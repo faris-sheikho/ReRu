@@ -397,3 +397,63 @@ fn type_reports_existing_and_missing_key_types() {
     stream.write_all(&command(&[b"TYPE", b"items"])).unwrap();
     read_exact_response(&mut stream, b"+list\r\n");
 }
+
+#[test]
+fn xadd_creates_stream_and_validates_ids() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream
+        .write_all(&command(&[b"XADD", b"events", b"1-0", b"name", b"first"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"$3\r\n1-0\r\n");
+    stream.write_all(&command(&[b"TYPE", b"events"])).unwrap();
+    read_exact_response(&mut stream, b"+stream\r\n");
+    stream
+        .write_all(&command(&[b"XADD", b"events", b"1-*", b"name", b"second"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"$3\r\n1-1\r\n");
+    stream
+        .write_all(&command(&[
+            b"XADD",
+            b"events",
+            b"1-1",
+            b"name",
+            b"duplicate",
+        ]))
+        .unwrap();
+    read_exact_response(
+        &mut stream,
+        b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n",
+    );
+}
+
+#[test]
+fn xrange_returns_stream_entries_and_respects_bounds() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream
+        .write_all(&command(&[b"XRANGE", b"missing", b"-", b"+"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*0\r\n");
+    stream
+        .write_all(&command(&[b"XADD", b"events", b"1-0", b"f", b"a"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"$3\r\n1-0\r\n");
+    stream
+        .write_all(&command(&[b"XADD", b"events", b"2-0", b"f", b"b"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"$3\r\n2-0\r\n");
+    stream
+        .write_all(&command(&[b"XRANGE", b"events", b"-", b"+"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*2\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$1\r\nf\r\n$1\r\na\r\n*2\r\n$3\r\n2-0\r\n*2\r\n$1\r\nf\r\n$1\r\nb\r\n");
+    stream
+        .write_all(&command(&[
+            b"XRANGE", b"events", b"(1-0", b"+", b"COUNT", b"1",
+        ]))
+        .unwrap();
+    read_exact_response(
+        &mut stream,
+        b"*1\r\n*2\r\n$3\r\n2-0\r\n*2\r\n$1\r\nf\r\n$1\r\nb\r\n",
+    );
+}

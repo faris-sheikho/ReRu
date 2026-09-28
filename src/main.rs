@@ -1,4 +1,5 @@
 mod protocol;
+mod streams;
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant};
 enum Value {
     String(Vec<u8>),
     List(Vec<Vec<u8>>),
+    Stream(streams::Stream),
 }
 
 struct Entry {
@@ -94,10 +96,7 @@ fn try_blpop(entries: &mut HashMap<Vec<u8>, Entry>, keys: &[Vec<u8>]) -> Option<
                 }
                 return Some(protocol::array(&[key.clone(), value]));
             }
-            Some(Entry {
-                value: Value::String(_),
-                ..
-            }) => {
+            Some(_) => {
                 return Some(
                     b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
                         .to_vec(),
@@ -163,7 +162,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 remove_expired(&mut store, &command[1]);
                 match store.get(&command[1]).map(|entry| &entry.value) {
                     Some(Value::String(value)) => protocol::bulk(value),
-                    Some(Value::List(_)) => {
+                    Some(_) => {
                         b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
                             .to_vec()
                     }
@@ -186,11 +185,10 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         changed.notify_all();
                         format!(":{}\r\n", items.len()).into_bytes()
                     }
-                    Some(Entry {
-                        value: Value::String(_),
-                        ..
-                    }) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                        .to_vec(),
+                    Some(_) => {
+                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                            .to_vec()
+                    }
                     None => {
                         store.insert(
                             command[1].clone(),
@@ -219,7 +217,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         remove_expired(&mut store, &command[1]);
                         match store.get(&command[1]).map(|entry| &entry.value) {
                             Some(Value::List(items)) => list_range(items, start, stop),
-                            Some(Value::String(_)) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
+                            Some(_) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
                             None => protocol::array(&[]),
                         }
                     }
@@ -242,11 +240,10 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         changed.notify_all();
                         format!(":{}\r\n", items.len()).into_bytes()
                     }
-                    Some(Entry {
-                        value: Value::String(_),
-                        ..
-                    }) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                        .to_vec(),
+                    Some(_) => {
+                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                            .to_vec()
+                    }
                     None => {
                         store.insert(
                             command[1].clone(),
@@ -268,7 +265,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 remove_expired(&mut store, &command[1]);
                 match store.get(&command[1]).map(|entry| &entry.value) {
                     Some(Value::List(items)) => format!(":{}\r\n", items.len()).into_bytes(),
-                    Some(Value::String(_)) => {
+                    Some(_) => {
                         b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
                             .to_vec()
                     }
@@ -308,7 +305,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                                     }
                                 }
                             }
-                            Some(Entry { value: Value::String(_), .. }) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
+                            Some(_) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
                             None => b"$-1\r\n".to_vec(),
                         }
                     }
@@ -352,7 +349,76 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 match entries.get(&command[1]).map(|entry| &entry.value) {
                     Some(Value::String(_)) => b"+string\r\n".to_vec(),
                     Some(Value::List(_)) => b"+list\r\n".to_vec(),
+                    Some(Value::Stream(_)) => b"+stream\r\n".to_vec(),
                     None => b"+none\r\n".to_vec(),
+                }
+            }
+        } else if command[0].eq_ignore_ascii_case(b"XADD") {
+            if command.len() < 5 || command.len() % 2 == 0 {
+                protocol::error("wrong number of arguments for 'xadd' command")
+            } else {
+                let mut entries = store.entries.lock().unwrap();
+                remove_expired(&mut entries, &command[1]);
+                let fields = command[3..].to_vec();
+                let result = match entries.get_mut(&command[1]) {
+                    Some(Entry {
+                        value: Value::Stream(stream),
+                        ..
+                    }) => stream.append(&command[2], fields),
+                    Some(_) => {
+                        stream.write_all(b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")?;
+                        continue;
+                    }
+                    None => {
+                        let mut new_stream = streams::Stream::default();
+                        let id = new_stream.append(&command[2], fields);
+                        if id.is_ok() {
+                            entries.insert(
+                                command[1].clone(),
+                                Entry {
+                                    value: Value::Stream(new_stream),
+                                    expires_at: None,
+                                },
+                            );
+                        }
+                        id
+                    }
+                };
+                match result {
+                    Ok(id) => {
+                        store.changed.notify_all();
+                        protocol::bulk(id.to_string().as_bytes())
+                    }
+                    Err(message) => protocol::error(message),
+                }
+            }
+        } else if command[0].eq_ignore_ascii_case(b"XRANGE") {
+            if command.len() != 4
+                && (command.len() != 6 || !command[4].eq_ignore_ascii_case(b"COUNT"))
+            {
+                protocol::error("wrong number of arguments for 'xrange' command")
+            } else {
+                let count = if command.len() == 6 {
+                    std::str::from_utf8(&command[5])
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                } else {
+                    Some(usize::MAX)
+                };
+                match count {
+                    None => protocol::error("value is not an integer or out of range"),
+                    Some(count) => {
+                        let mut entries = store.entries.lock().unwrap();
+                        remove_expired(&mut entries, &command[1]);
+                        match entries.get(&command[1]).map(|entry| &entry.value) {
+                            Some(Value::Stream(stream)) => match stream.range(&command[2], &command[3], Some(count)) {
+                                Ok(found) => protocol::stream_entries(&found),
+                                Err(message) => protocol::error(message),
+                            },
+                            Some(_) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
+                            None => protocol::array(&[]),
+                        }
+                    }
                 }
             }
         } else {

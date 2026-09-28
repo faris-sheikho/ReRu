@@ -1,0 +1,198 @@
+use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StreamId {
+    pub milliseconds: u64,
+    pub sequence: u64,
+}
+
+impl fmt::Display for StreamId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}-{}", self.milliseconds, self.sequence)
+    }
+}
+
+#[derive(Debug)]
+pub struct StreamEntry {
+    pub id: StreamId,
+    pub fields: Vec<Vec<u8>>,
+}
+
+#[derive(Default, Debug)]
+pub struct Stream {
+    pub entries: Vec<StreamEntry>,
+}
+
+enum IdInput {
+    Automatic,
+    Partial(u64),
+    Explicit(StreamId),
+}
+
+impl IdInput {
+    fn parse(raw: &[u8]) -> Result<Self, &'static str> {
+        if raw == b"*" {
+            return Ok(Self::Automatic);
+        }
+        let text = std::str::from_utf8(raw)
+            .map_err(|_| "Invalid stream ID specified as stream command argument")?;
+        let (milliseconds, sequence) = text
+            .split_once('-')
+            .ok_or("Invalid stream ID specified as stream command argument")?;
+        let milliseconds = milliseconds
+            .parse::<u64>()
+            .map_err(|_| "Invalid stream ID specified as stream command argument")?;
+        if sequence == "*" {
+            return Ok(Self::Partial(milliseconds));
+        }
+        let sequence = sequence
+            .parse::<u64>()
+            .map_err(|_| "Invalid stream ID specified as stream command argument")?;
+        Ok(Self::Explicit(StreamId {
+            milliseconds,
+            sequence,
+        }))
+    }
+}
+
+impl Stream {
+    pub fn append(
+        &mut self,
+        raw_id: &[u8],
+        fields: Vec<Vec<u8>>,
+    ) -> Result<StreamId, &'static str> {
+        let last = self.entries.last().map(|entry| entry.id);
+        let id = match IdInput::parse(raw_id)? {
+            IdInput::Automatic => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| "Invalid stream ID specified as stream command argument")?
+                    .as_millis();
+                let milliseconds = u64::try_from(now)
+                    .map_err(|_| "Invalid stream ID specified as stream command argument")?
+                    .max(last.map_or(0, |id| id.milliseconds));
+                Self::generated_id(milliseconds, last)?
+            }
+            IdInput::Partial(milliseconds) => Self::generated_id(milliseconds, last)?,
+            IdInput::Explicit(id) => id,
+        };
+        if id
+            == (StreamId {
+                milliseconds: 0,
+                sequence: 0,
+            })
+        {
+            return Err("The ID specified in XADD must be greater than 0-0");
+        }
+        if last.is_some_and(|last| id <= last) {
+            return Err(
+                "The ID specified in XADD is equal or smaller than the target stream top item",
+            );
+        }
+        self.entries.push(StreamEntry { id, fields });
+        Ok(id)
+    }
+
+    fn generated_id(milliseconds: u64, last: Option<StreamId>) -> Result<StreamId, &'static str> {
+        let sequence = match last {
+            Some(last) if last.milliseconds == milliseconds => last.sequence.checked_add(1).ok_or(
+                "The ID specified in XADD is equal or smaller than the target stream top item",
+            )?,
+            _ if milliseconds == 0 => 1,
+            _ => 0,
+        };
+        Ok(StreamId {
+            milliseconds,
+            sequence,
+        })
+    }
+
+    pub fn range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        count: Option<usize>,
+    ) -> Result<Vec<&StreamEntry>, &'static str> {
+        let (start, start_exclusive) = parse_bound(start, false)?;
+        let (end, end_exclusive) = parse_bound(end, true)?;
+        let limit = count.unwrap_or(usize::MAX);
+        Ok(self
+            .entries
+            .iter()
+            .filter(|entry| {
+                (entry.id > start || (!start_exclusive && entry.id == start))
+                    && (entry.id < end || (!end_exclusive && entry.id == end))
+            })
+            .take(limit)
+            .collect())
+    }
+}
+
+fn parse_bound(raw: &[u8], upper: bool) -> Result<(StreamId, bool), &'static str> {
+    if raw == b"-" {
+        return Ok((
+            StreamId {
+                milliseconds: 0,
+                sequence: 0,
+            },
+            false,
+        ));
+    }
+    if raw == b"+" {
+        return Ok((
+            StreamId {
+                milliseconds: u64::MAX,
+                sequence: u64::MAX,
+            },
+            false,
+        ));
+    }
+    let (raw, exclusive) = if raw.first() == Some(&b'(') {
+        (&raw[1..], true)
+    } else {
+        (raw, false)
+    };
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| "Invalid stream ID specified as stream command argument")?;
+    let (milliseconds, sequence) = match text.split_once('-') {
+        Some((milliseconds, sequence)) => (milliseconds, Some(sequence)),
+        None => (text, None),
+    };
+    let milliseconds = milliseconds
+        .parse::<u64>()
+        .map_err(|_| "Invalid stream ID specified as stream command argument")?;
+    let sequence = match sequence {
+        Some(sequence) => sequence
+            .parse::<u64>()
+            .map_err(|_| "Invalid stream ID specified as stream command argument")?,
+        None if upper => u64::MAX,
+        None => 0,
+    };
+    Ok((
+        StreamId {
+            milliseconds,
+            sequence,
+        },
+        exclusive,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_and_generates_ids() {
+        let mut stream = Stream::default();
+        assert_eq!(
+            stream.append(b"0-0", vec![]).unwrap_err(),
+            "The ID specified in XADD must be greater than 0-0"
+        );
+        assert_eq!(stream.append(b"1-0", vec![]).unwrap().to_string(), "1-0");
+        assert_eq!(stream.append(b"1-*", vec![]).unwrap().to_string(), "1-1");
+        assert!(stream.append(b"1-1", vec![]).is_err());
+        assert!(stream.append(b"garbage", vec![]).is_err());
+        assert_eq!(stream.entries.len(), 2);
+    }
+}
