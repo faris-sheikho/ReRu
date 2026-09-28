@@ -172,6 +172,37 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                     _ => protocol::error("value is not an integer or out of range"),
                 }
             }
+        } else if command[0].eq_ignore_ascii_case(b"LPUSH") {
+            if command.len() < 3 {
+                protocol::error("wrong number of arguments for 'lpush' command")
+            } else {
+                let mut store = store.lock().unwrap();
+                remove_expired(&mut store, &command[1]);
+                match store.get_mut(&command[1]) {
+                    Some(Entry {
+                        value: Value::List(items),
+                        ..
+                    }) => {
+                        items.splice(0..0, command[2..].iter().rev().cloned());
+                        format!(":{}\r\n", items.len()).into_bytes()
+                    }
+                    Some(Entry {
+                        value: Value::String(_),
+                        ..
+                    }) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                    None => {
+                        store.insert(
+                            command[1].clone(),
+                            Entry {
+                                value: Value::List(command[2..].iter().rev().cloned().collect()),
+                                expires_at: None,
+                            },
+                        );
+                        format!(":{}\r\n", command.len() - 2).into_bytes()
+                    }
+                }
+            }
         } else {
             protocol::error("unknown command")
         };
