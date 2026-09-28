@@ -99,7 +99,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 }
             }
         } else if command[0].eq_ignore_ascii_case(b"RPUSH") {
-            if command.len() != 3 {
+            if command.len() < 3 {
                 protocol::error("wrong number of arguments for 'rpush' command")
             } else {
                 let mut store = store.lock().unwrap();
@@ -109,7 +109,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         value: Value::List(items),
                         ..
                     }) => {
-                        items.push(command[2].clone());
+                        items.extend_from_slice(&command[2..]);
                         format!(":{}\r\n", items.len()).into_bytes()
                     }
                     Some(Entry {
@@ -121,11 +121,11 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         store.insert(
                             command[1].clone(),
                             Entry {
-                                value: Value::List(vec![command[2].clone()]),
+                                value: Value::List(command[2..].to_vec()),
                                 expires_at: None,
                             },
                         );
-                        b":1\r\n".to_vec()
+                        format!(":{}\r\n", command.len() - 2).into_bytes()
                     }
                 }
             }

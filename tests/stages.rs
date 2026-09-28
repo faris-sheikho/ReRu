@@ -157,3 +157,22 @@ fn rpush_appends_to_an_existing_list_across_clients() {
         b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
     );
 }
+
+#[test]
+fn rpush_accepts_multiple_elements_atomically() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream
+        .write_all(&command(&[b"RPUSH", b"items", b"one", b"two", b"three"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":3\r\n");
+    stream
+        .write_all(&command(&[b"RPUSH", b"items", b"four", b"five"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":5\r\n");
+    stream.write_all(&command(&[b"RPUSH", b"items"])).unwrap();
+    read_exact_response(
+        &mut stream,
+        b"-ERR wrong number of arguments for 'rpush' command\r\n",
+    );
+}
