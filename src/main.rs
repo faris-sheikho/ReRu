@@ -218,6 +218,32 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                     None => b":0\r\n".to_vec(),
                 }
             }
+        } else if command[0].eq_ignore_ascii_case(b"LPOP") {
+            if command.len() != 2 {
+                protocol::error("wrong number of arguments for 'lpop' command")
+            } else {
+                let mut store = store.lock().unwrap();
+                remove_expired(&mut store, &command[1]);
+                match store.get_mut(&command[1]) {
+                    Some(Entry {
+                        value: Value::List(items),
+                        ..
+                    }) => {
+                        let value = items.remove(0);
+                        let empty = items.is_empty();
+                        if empty {
+                            store.remove(&command[1]);
+                        }
+                        protocol::bulk(&value)
+                    }
+                    Some(Entry {
+                        value: Value::String(_),
+                        ..
+                    }) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                    None => b"$-1\r\n".to_vec(),
+                }
+            }
         } else {
             protocol::error("unknown command")
         };

@@ -265,3 +265,25 @@ fn llen_reports_missing_and_existing_lists() {
     stream.write_all(&command(&[b"LLEN", b"items"])).unwrap();
     read_exact_response(&mut stream, b":3\r\n");
 }
+
+#[test]
+fn lpop_removes_front_and_deletes_empty_list_key() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream.write_all(&command(&[b"LPOP", b"items"])).unwrap();
+    read_exact_response(&mut stream, b"$-1\r\n");
+    stream
+        .write_all(&command(&[b"RPUSH", b"items", b"a", b"b"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":2\r\n");
+    stream.write_all(&command(&[b"LPOP", b"items"])).unwrap();
+    read_exact_response(&mut stream, b"$1\r\na\r\n");
+    stream.write_all(&command(&[b"LPOP", b"items"])).unwrap();
+    read_exact_response(&mut stream, b"$1\r\nb\r\n");
+    stream.write_all(&command(&[b"LLEN", b"items"])).unwrap();
+    read_exact_response(&mut stream, b":0\r\n");
+    stream
+        .write_all(&command(&[b"LPUSH", b"items", b"new"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":1\r\n");
+}
