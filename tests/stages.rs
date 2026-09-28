@@ -377,3 +377,23 @@ fn blpop_wakes_before_timeout() {
     read_exact_response(&mut writer, b":1\r\n");
     read_exact_response(&mut blocked, b"*2\r\n$5\r\nitems\r\n$5\r\nready\r\n");
 }
+
+#[test]
+fn type_reports_existing_and_missing_key_types() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream.write_all(&command(&[b"TYPE", b"missing"])).unwrap();
+    read_exact_response(&mut stream, b"+none\r\n");
+    stream
+        .write_all(&command(&[b"SET", b"text", b"value"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"+OK\r\n");
+    stream.write_all(&command(&[b"TYPE", b"text"])).unwrap();
+    read_exact_response(&mut stream, b"+string\r\n");
+    stream
+        .write_all(&command(&[b"LPUSH", b"items", b"one"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":1\r\n");
+    stream.write_all(&command(&[b"TYPE", b"items"])).unwrap();
+    read_exact_response(&mut stream, b"+list\r\n");
+}

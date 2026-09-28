@@ -343,6 +343,18 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                     }
                 }
             }
+        } else if command[0].eq_ignore_ascii_case(b"TYPE") {
+            if command.len() != 2 {
+                protocol::error("wrong number of arguments for 'type' command")
+            } else {
+                let mut entries = store.entries.lock().unwrap();
+                remove_expired(&mut entries, &command[1]);
+                match entries.get(&command[1]).map(|entry| &entry.value) {
+                    Some(Value::String(_)) => b"+string\r\n".to_vec(),
+                    Some(Value::List(_)) => b"+list\r\n".to_vec(),
+                    None => b"+none\r\n".to_vec(),
+                }
+            }
         } else {
             protocol::error("unknown command")
         };
