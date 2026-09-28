@@ -109,6 +109,23 @@ fn try_blpop(entries: &mut HashMap<Vec<u8>, Entry>, keys: &[Vec<u8>]) -> Option<
     None
 }
 
+fn blpop_deadline(timeout: &[u8]) -> Result<Option<Instant>, Vec<u8>> {
+    let seconds = std::str::from_utf8(timeout)
+        .ok()
+        .and_then(|text| text.parse::<f64>().ok())
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .ok_or_else(|| protocol::error("timeout is not a float or out of range"))?;
+    if seconds == 0.0 {
+        return Ok(None);
+    }
+    let duration = Duration::try_from_secs_f64(seconds)
+        .map_err(|_| protocol::error("timeout is not a float or out of range"))?;
+    Instant::now()
+        .checked_add(duration)
+        .map(Some)
+        .ok_or_else(|| protocol::error("timeout is not a float or out of range"))
+}
+
 fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     while let Some(command) = protocol::read_command(&mut reader)? {
@@ -300,16 +317,30 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
         } else if command[0].eq_ignore_ascii_case(b"BLPOP") {
             if command.len() < 3 {
                 protocol::error("wrong number of arguments for 'blpop' command")
-            } else if command.last().is_none_or(|timeout| timeout != b"0") {
-                protocol::error("nonzero timeout is not implemented yet")
             } else {
-                let keys = &command[1..command.len() - 1];
-                let mut entries = store.entries.lock().unwrap();
-                loop {
-                    if let Some(response) = try_blpop(&mut entries, keys) {
-                        break response;
+                match blpop_deadline(command.last().unwrap()) {
+                    Err(error) => error,
+                    Ok(deadline) => {
+                        let keys = &command[1..command.len() - 1];
+                        let mut entries = store.entries.lock().unwrap();
+                        loop {
+                            if let Some(response) = try_blpop(&mut entries, keys) {
+                                break response;
+                            }
+                            match deadline {
+                                Some(deadline) => {
+                                    let remaining =
+                                        deadline.saturating_duration_since(Instant::now());
+                                    if remaining.is_zero() {
+                                        break b"*-1\r\n".to_vec();
+                                    }
+                                    entries =
+                                        store.changed.wait_timeout(entries, remaining).unwrap().0;
+                                }
+                                None => entries = store.changed.wait(entries).unwrap(),
+                            }
+                        }
                     }
-                    entries = store.changed.wait(entries).unwrap();
                 }
             }
         } else {

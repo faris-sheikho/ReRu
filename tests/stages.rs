@@ -347,3 +347,33 @@ fn blpop_prefers_the_first_nonempty_key() {
         .unwrap();
     read_exact_response(&mut stream, b"*2\r\n$5\r\nfirst\r\n$1\r\na\r\n");
 }
+
+#[test]
+fn blpop_times_out_with_null_array() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    let start = std::time::Instant::now();
+    stream
+        .write_all(&command(&[b"BLPOP", b"missing", b"0.15"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*-1\r\n");
+    assert!(start.elapsed() >= std::time::Duration::from_millis(100));
+    stream.write_all(&command(&[b"PING"])).unwrap();
+    read_exact_response(&mut stream, b"+PONG\r\n");
+}
+
+#[test]
+fn blpop_wakes_before_timeout() {
+    let server = common::Server::start();
+    let mut blocked = server.connect().unwrap();
+    let mut writer = server.connect().unwrap();
+    blocked
+        .write_all(&command(&[b"BLPOP", b"items", b"1.5"]))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    writer
+        .write_all(&command(&[b"LPUSH", b"items", b"ready"]))
+        .unwrap();
+    read_exact_response(&mut writer, b":1\r\n");
+    read_exact_response(&mut blocked, b"*2\r\n$5\r\nitems\r\n$5\r\nready\r\n");
+}
