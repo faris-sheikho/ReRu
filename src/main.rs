@@ -219,29 +219,42 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 }
             }
         } else if command[0].eq_ignore_ascii_case(b"LPOP") {
-            if command.len() != 2 {
+            if command.len() != 2 && command.len() != 3 {
                 protocol::error("wrong number of arguments for 'lpop' command")
             } else {
-                let mut store = store.lock().unwrap();
-                remove_expired(&mut store, &command[1]);
-                match store.get_mut(&command[1]) {
-                    Some(Entry {
-                        value: Value::List(items),
-                        ..
-                    }) => {
-                        let value = items.remove(0);
-                        let empty = items.is_empty();
-                        if empty {
-                            store.remove(&command[1]);
+                let count = if command.len() == 3 {
+                    std::str::from_utf8(&command[2])
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                } else {
+                    Some(1)
+                };
+                match count {
+                    None => protocol::error("value is not an integer or out of range"),
+                    Some(count) => {
+                        let mut store = store.lock().unwrap();
+                        remove_expired(&mut store, &command[1]);
+                        match store.get_mut(&command[1]) {
+                            Some(Entry { value: Value::List(items), .. }) => {
+                                if count == 0 {
+                                    b"*-1\r\n".to_vec()
+                                } else {
+                                    let values: Vec<_> = items.drain(..count.min(items.len())).collect();
+                                    let empty = items.is_empty();
+                                    if empty {
+                                        store.remove(&command[1]);
+                                    }
+                                    if command.len() == 2 {
+                                        protocol::bulk(&values[0])
+                                    } else {
+                                        protocol::array(&values)
+                                    }
+                                }
+                            }
+                            Some(Entry { value: Value::String(_), .. }) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
+                            None => b"$-1\r\n".to_vec(),
                         }
-                        protocol::bulk(&value)
                     }
-                    Some(Entry {
-                        value: Value::String(_),
-                        ..
-                    }) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                        .to_vec(),
-                    None => b"$-1\r\n".to_vec(),
                 }
             }
         } else {
