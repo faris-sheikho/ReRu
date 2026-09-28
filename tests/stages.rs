@@ -198,3 +198,29 @@ fn lrange_returns_inclusive_positive_range() {
         .unwrap();
     read_exact_response(&mut stream, b"*0\r\n");
 }
+
+#[test]
+fn lrange_supports_negative_indexes() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream
+        .write_all(&command(&[b"RPUSH", b"items", b"a", b"b", b"c"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":3\r\n");
+    stream
+        .write_all(&command(&[b"LRANGE", b"items", b"0", b"-1"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+    stream
+        .write_all(&command(&[b"LRANGE", b"items", b"-2", b"-1"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*2\r\n$1\r\nb\r\n$1\r\nc\r\n");
+    stream
+        .write_all(&command(&[b"LRANGE", b"items", b"-99", b"-4"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*0\r\n");
+    stream
+        .write_all(&command(&[b"LRANGE", b"items", b"-99", b"99"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+}

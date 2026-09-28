@@ -54,6 +54,27 @@ fn set_expiry(command: &[Vec<u8>]) -> Result<Option<Instant>, Vec<u8>> {
     Ok(Some(expires_at))
 }
 
+fn list_range(items: &[Vec<u8>], start: i64, stop: i64) -> Vec<u8> {
+    let len = items.len() as i128;
+    if len == 0 {
+        return protocol::array(&[]);
+    }
+    let normalize = |index: i64| {
+        if index < 0 {
+            len + i128::from(index)
+        } else {
+            i128::from(index)
+        }
+    };
+    let start = normalize(start).max(0);
+    let stop = normalize(stop).min(len - 1);
+    if start >= len || stop < start {
+        protocol::array(&[])
+    } else {
+        protocol::array(&items[start as usize..=stop as usize])
+    }
+}
+
 fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     while let Some(command) = protocol::read_command(&mut reader)? {
@@ -139,25 +160,14 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         .and_then(|s| s.parse::<i64>().ok())
                 });
                 match indexes {
-                    [Some(start), Some(stop)] if start >= 0 && stop >= 0 => {
+                    [Some(start), Some(stop)] => {
                         let mut store = store.lock().unwrap();
                         remove_expired(&mut store, &command[1]);
                         match store.get(&command[1]).map(|entry| &entry.value) {
-                            Some(Value::List(items)) => {
-                                let start = usize::try_from(start).unwrap_or(usize::MAX);
-                                let stop = usize::try_from(stop).unwrap_or(usize::MAX);
-                                if start >= items.len() || stop < start {
-                                    protocol::array(&[])
-                                } else {
-                                    protocol::array(&items[start..=stop.min(items.len() - 1)])
-                                }
-                            }
+                            Some(Value::List(items)) => list_range(items, start, stop),
                             Some(Value::String(_)) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
                             None => protocol::array(&[]),
                         }
-                    }
-                    [Some(_), Some(_)] => {
-                        protocol::error("negative indexes are not implemented yet")
                     }
                     _ => protocol::error("value is not an integer or out of range"),
                 }
