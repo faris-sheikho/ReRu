@@ -6,12 +6,25 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+enum Value {
+    String(Vec<u8>),
+    List(Vec<Vec<u8>>),
+}
+
 struct Entry {
-    value: Vec<u8>,
+    value: Value,
     expires_at: Option<Instant>,
 }
 
 type Store = Arc<Mutex<HashMap<Vec<u8>, Entry>>>;
+
+fn remove_expired(store: &mut HashMap<Vec<u8>, Entry>, key: &[u8]) {
+    if store.get(key).is_some_and(|entry| {
+        entry.expires_at.is_some_and(|expiry| Instant::now() >= expiry)
+    }) {
+        store.remove(key);
+    }
+}
 
 fn set_expiry(command: &[Vec<u8>]) -> Result<Option<Instant>, Vec<u8>> {
     if command.len() == 3 {
@@ -58,7 +71,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                     Ok(expires_at) => {
                         store.lock().unwrap().insert(
                             command[1].clone(),
-                            Entry { value: command[2].clone(), expires_at },
+                            Entry { value: Value::String(command[2].clone()), expires_at },
                         );
                         b"+OK\r\n".to_vec()
                     }
@@ -70,13 +83,28 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 protocol::error("wrong number of arguments for 'get' command")
             } else {
                 let mut store = store.lock().unwrap();
-                if store.get(&command[1]).is_some_and(|entry| {
-                    entry.expires_at.is_some_and(|expiry| Instant::now() >= expiry)
-                }) {
-                    store.remove(&command[1]);
+                remove_expired(&mut store, &command[1]);
+                match store.get(&command[1]).map(|entry| &entry.value) {
+                    Some(Value::String(value)) => protocol::bulk(value),
+                    Some(Value::List(_)) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
+                    None => b"$-1\r\n".to_vec(),
                 }
-                store.get(&command[1])
-                    .map_or_else(|| b"$-1\r\n".to_vec(), |entry| protocol::bulk(&entry.value))
+            }
+        } else if command[0].eq_ignore_ascii_case(b"RPUSH") {
+            if command.len() != 3 {
+                protocol::error("wrong number of arguments for 'rpush' command")
+            } else {
+                let mut store = store.lock().unwrap();
+                remove_expired(&mut store, &command[1]);
+                if store.contains_key(&command[1]) {
+                    protocol::error("appending to an existing list is not implemented yet")
+                } else {
+                    store.insert(
+                        command[1].clone(),
+                        Entry { value: Value::List(vec![command[2].clone()]), expires_at: None },
+                    );
+                    b":1\r\n".to_vec()
+                }
             }
         } else {
             protocol::error("unknown command")

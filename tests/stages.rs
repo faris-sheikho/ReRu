@@ -102,3 +102,13 @@ fn set_px_expires_and_overwriting_clears_expiry() {
     stream.write_all(&command(&[b"GET", b"temporary"])).unwrap();
     read_exact_response(&mut stream, b"$9\r\npermanent\r\n");
 }
+
+#[test]
+fn rpush_creates_a_list() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream.write_all(&command(&[b"RPUSH", b"items", b"first"])).unwrap();
+    read_exact_response(&mut stream, b":1\r\n");
+    stream.write_all(&command(&[b"GET", b"items"])).unwrap();
+    read_exact_response(&mut stream, b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
