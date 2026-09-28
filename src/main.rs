@@ -203,6 +203,21 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                     }
                 }
             }
+        } else if command[0].eq_ignore_ascii_case(b"LLEN") {
+            if command.len() != 2 {
+                protocol::error("wrong number of arguments for 'llen' command")
+            } else {
+                let mut store = store.lock().unwrap();
+                remove_expired(&mut store, &command[1]);
+                match store.get(&command[1]).map(|entry| &entry.value) {
+                    Some(Value::List(items)) => format!(":{}\r\n", items.len()).into_bytes(),
+                    Some(Value::String(_)) => {
+                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                            .to_vec()
+                    }
+                    None => b":0\r\n".to_vec(),
+                }
+            }
         } else {
             protocol::error("unknown command")
         };
