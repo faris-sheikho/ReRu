@@ -73,11 +73,15 @@ fn set_and_get_share_data_across_clients() {
     let mut reader = server.connect().unwrap();
     reader.write_all(&command(&[b"GET", b"missing"])).unwrap();
     read_exact_response(&mut reader, b"$-1\r\n");
-    writer.write_all(&command(&[b"SET", b"key", b"a\0b"])).unwrap();
+    writer
+        .write_all(&command(&[b"SET", b"key", b"a\0b"]))
+        .unwrap();
     read_exact_response(&mut writer, b"+OK\r\n");
     reader.write_all(&command(&[b"GET", b"key"])).unwrap();
     read_exact_response(&mut reader, b"$3\r\na\0b\r\n");
-    writer.write_all(&command(&[b"SET", b"key", b"new"])).unwrap();
+    writer
+        .write_all(&command(&[b"SET", b"key", b"new"]))
+        .unwrap();
     read_exact_response(&mut writer, b"+OK\r\n");
     reader.write_all(&command(&[b"GET", b"key"])).unwrap();
     read_exact_response(&mut reader, b"$3\r\nnew\r\n");
@@ -87,16 +91,22 @@ fn set_and_get_share_data_across_clients() {
 fn set_px_expires_and_overwriting_clears_expiry() {
     let server = common::Server::start();
     let mut stream = server.connect().unwrap();
-    stream.write_all(&command(&[b"SET", b"temporary", b"one", b"PX", b"250"])).unwrap();
+    stream
+        .write_all(&command(&[b"SET", b"temporary", b"one", b"PX", b"250"]))
+        .unwrap();
     read_exact_response(&mut stream, b"+OK\r\n");
     stream.write_all(&command(&[b"GET", b"temporary"])).unwrap();
     read_exact_response(&mut stream, b"$3\r\none\r\n");
     std::thread::sleep(std::time::Duration::from_millis(320));
     stream.write_all(&command(&[b"GET", b"temporary"])).unwrap();
     read_exact_response(&mut stream, b"$-1\r\n");
-    stream.write_all(&command(&[b"SET", b"temporary", b"two", b"PX", b"250"])).unwrap();
+    stream
+        .write_all(&command(&[b"SET", b"temporary", b"two", b"PX", b"250"]))
+        .unwrap();
     read_exact_response(&mut stream, b"+OK\r\n");
-    stream.write_all(&command(&[b"SET", b"temporary", b"permanent"])).unwrap();
+    stream
+        .write_all(&command(&[b"SET", b"temporary", b"permanent"]))
+        .unwrap();
     read_exact_response(&mut stream, b"+OK\r\n");
     std::thread::sleep(std::time::Duration::from_millis(320));
     stream.write_all(&command(&[b"GET", b"temporary"])).unwrap();
@@ -107,8 +117,43 @@ fn set_px_expires_and_overwriting_clears_expiry() {
 fn rpush_creates_a_list() {
     let server = common::Server::start();
     let mut stream = server.connect().unwrap();
-    stream.write_all(&command(&[b"RPUSH", b"items", b"first"])).unwrap();
+    stream
+        .write_all(&command(&[b"RPUSH", b"items", b"first"]))
+        .unwrap();
     read_exact_response(&mut stream, b":1\r\n");
     stream.write_all(&command(&[b"GET", b"items"])).unwrap();
-    read_exact_response(&mut stream, b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    read_exact_response(
+        &mut stream,
+        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+    );
+}
+
+#[test]
+fn rpush_appends_to_an_existing_list_across_clients() {
+    let server = common::Server::start();
+    let mut first = server.connect().unwrap();
+    let mut second = server.connect().unwrap();
+    first
+        .write_all(&command(&[b"RPUSH", b"items", b"first"]))
+        .unwrap();
+    read_exact_response(&mut first, b":1\r\n");
+    second
+        .write_all(&command(&[b"RPUSH", b"items", b"second"]))
+        .unwrap();
+    read_exact_response(&mut second, b":2\r\n");
+    first
+        .write_all(&command(&[b"RPUSH", b"items", b"third"]))
+        .unwrap();
+    read_exact_response(&mut first, b":3\r\n");
+    second
+        .write_all(&command(&[b"SET", b"string", b"value"]))
+        .unwrap();
+    read_exact_response(&mut second, b"+OK\r\n");
+    first
+        .write_all(&command(&[b"RPUSH", b"string", b"bad"]))
+        .unwrap();
+    read_exact_response(
+        &mut first,
+        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+    );
 }

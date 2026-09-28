@@ -20,7 +20,9 @@ type Store = Arc<Mutex<HashMap<Vec<u8>, Entry>>>;
 
 fn remove_expired(store: &mut HashMap<Vec<u8>, Entry>, key: &[u8]) {
     if store.get(key).is_some_and(|entry| {
-        entry.expires_at.is_some_and(|expiry| Instant::now() >= expiry)
+        entry
+            .expires_at
+            .is_some_and(|expiry| Instant::now() >= expiry)
     }) {
         store.remove(key);
     }
@@ -71,7 +73,10 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                     Ok(expires_at) => {
                         store.lock().unwrap().insert(
                             command[1].clone(),
-                            Entry { value: Value::String(command[2].clone()), expires_at },
+                            Entry {
+                                value: Value::String(command[2].clone()),
+                                expires_at,
+                            },
                         );
                         b"+OK\r\n".to_vec()
                     }
@@ -86,7 +91,10 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 remove_expired(&mut store, &command[1]);
                 match store.get(&command[1]).map(|entry| &entry.value) {
                     Some(Value::String(value)) => protocol::bulk(value),
-                    Some(Value::List(_)) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
+                    Some(Value::List(_)) => {
+                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                            .to_vec()
+                    }
                     None => b"$-1\r\n".to_vec(),
                 }
             }
@@ -96,14 +104,29 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             } else {
                 let mut store = store.lock().unwrap();
                 remove_expired(&mut store, &command[1]);
-                if store.contains_key(&command[1]) {
-                    protocol::error("appending to an existing list is not implemented yet")
-                } else {
-                    store.insert(
-                        command[1].clone(),
-                        Entry { value: Value::List(vec![command[2].clone()]), expires_at: None },
-                    );
-                    b":1\r\n".to_vec()
+                match store.get_mut(&command[1]) {
+                    Some(Entry {
+                        value: Value::List(items),
+                        ..
+                    }) => {
+                        items.push(command[2].clone());
+                        format!(":{}\r\n", items.len()).into_bytes()
+                    }
+                    Some(Entry {
+                        value: Value::String(_),
+                        ..
+                    }) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                    None => {
+                        store.insert(
+                            command[1].clone(),
+                            Entry {
+                                value: Value::List(vec![command[2].clone()]),
+                                expires_at: None,
+                            },
+                        );
+                        b":1\r\n".to_vec()
+                    }
                 }
             }
         } else {
@@ -121,7 +144,12 @@ fn main() -> io::Result<()> {
         [_, flag, value] if flag == "--port" => value.parse::<u16>().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "--port must be a valid port")
         })?,
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "usage: reru [--port PORT]")),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: reru [--port PORT]",
+            ))
+        }
     };
 
     let listener = TcpListener::bind(("127.0.0.1", port))?;

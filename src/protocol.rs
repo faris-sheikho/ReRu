@@ -7,7 +7,10 @@ fn line<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     reader.read_until(b'\n', &mut bytes)?;
     if bytes.len() > 64 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "header too long"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "header too long",
+        ));
     }
     if !bytes.ends_with(b"\r\n") {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "expected CRLF"));
@@ -30,21 +33,33 @@ pub fn read_command<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<Vec<u8>
     }
     let header = line(reader)?;
     if header.first() != Some(&b'*') {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "expected RESP array"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected RESP array",
+        ));
     }
     let count = number(&header[1..])?;
     if count == 0 || count > MAX_ARGS {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid argument count"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid argument count",
+        ));
     }
     let mut args = Vec::with_capacity(count);
     for _ in 0..count {
         let header = line(reader)?;
         if header.first() != Some(&b'$') {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "expected bulk string"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "expected bulk string",
+            ));
         }
         let len = number(&header[1..])?;
         if len > MAX_BULK {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bulk string too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bulk string too large",
+            ));
         }
         let mut value = vec![0; len];
         reader.read_exact(&mut value)?;
