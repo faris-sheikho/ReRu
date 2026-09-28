@@ -65,3 +65,20 @@ fn echoes_binary_data_across_split_tcp_writes() {
     stream.write_all(&request[mid..]).unwrap();
     read_exact_response(&mut stream, b"$10\r\nhi\r\n\0there\r\n");
 }
+
+#[test]
+fn set_and_get_share_data_across_clients() {
+    let server = common::Server::start();
+    let mut writer = server.connect().unwrap();
+    let mut reader = server.connect().unwrap();
+    reader.write_all(&command(&[b"GET", b"missing"])).unwrap();
+    read_exact_response(&mut reader, b"$-1\r\n");
+    writer.write_all(&command(&[b"SET", b"key", b"a\0b"])).unwrap();
+    read_exact_response(&mut writer, b"+OK\r\n");
+    reader.write_all(&command(&[b"GET", b"key"])).unwrap();
+    read_exact_response(&mut reader, b"$3\r\na\0b\r\n");
+    writer.write_all(&command(&[b"SET", b"key", b"new"])).unwrap();
+    read_exact_response(&mut writer, b"+OK\r\n");
+    reader.write_all(&command(&[b"GET", b"key"])).unwrap();
+    read_exact_response(&mut reader, b"$3\r\nnew\r\n");
+}
