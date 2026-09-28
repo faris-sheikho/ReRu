@@ -1,9 +1,10 @@
 # ReRu roadmap
 
 ReRu is an incremental Rust implementation of Redis-compatible behavior. The
-first 20 CodeCrafters milestones are implemented. The upstream Redis repository
-and its command documentation are references for behavior; a fixed upstream
-version and source-translation license have not yet been selected.
+first 20 CodeCrafters milestones and initial stream commands are implemented.
+Redis 8.10.2 is the pinned compatibility reference. The current Rust code uses
+upstream documentation for behavior; a direct source-translation license has
+not been selected.
 
 ## Compatibility target
 

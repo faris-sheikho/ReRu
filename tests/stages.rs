@@ -457,3 +457,116 @@ fn xrange_returns_stream_entries_and_respects_bounds() {
         b"*1\r\n*2\r\n$3\r\n2-0\r\n*2\r\n$1\r\nf\r\n$1\r\nb\r\n",
     );
 }
+
+#[test]
+fn xread_returns_entries_after_requested_id() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream
+        .write_all(&command(&[b"XADD", b"events", b"1-0", b"f", b"a"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"$3\r\n1-0\r\n");
+    stream
+        .write_all(&command(&[b"XREAD", b"STREAMS", b"events", b"0"]))
+        .unwrap();
+    read_exact_response(
+        &mut stream,
+        b"*1\r\n*2\r\n$6\r\nevents\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$1\r\nf\r\n$1\r\na\r\n",
+    );
+    stream
+        .write_all(&command(&[b"XREAD", b"STREAMS", b"events", b"1-0"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*-1\r\n");
+}
+
+#[test]
+fn xread_block_with_dollar_waits_for_new_entry() {
+    let server = common::Server::start();
+    let mut reader = server.connect().unwrap();
+    let mut writer = server.connect().unwrap();
+    writer
+        .write_all(&command(&[b"XADD", b"events", b"1-0", b"f", b"old"]))
+        .unwrap();
+    read_exact_response(&mut writer, b"$3\r\n1-0\r\n");
+    reader
+        .write_all(&command(&[
+            b"XREAD", b"BLOCK", b"500", b"STREAMS", b"events", b"$",
+        ]))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    writer
+        .write_all(&command(&[b"XADD", b"events", b"1-1", b"f", b"new"]))
+        .unwrap();
+    read_exact_response(&mut writer, b"$3\r\n1-1\r\n");
+    read_exact_response(
+        &mut reader,
+        b"*1\r\n*2\r\n$6\r\nevents\r\n*1\r\n*2\r\n$3\r\n1-1\r\n*2\r\n$1\r\nf\r\n$3\r\nnew\r\n",
+    );
+}
+
+#[test]
+fn xread_handles_multiple_streams_and_count() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    for (key, value) in [(b"first".as_slice(), b"a".as_slice()), (b"second", b"b")] {
+        stream
+            .write_all(&command(&[b"XADD", key, b"1-0", b"f", value]))
+            .unwrap();
+        read_exact_response(&mut stream, b"$3\r\n1-0\r\n");
+    }
+    stream
+        .write_all(&command(&[
+            b"XREAD", b"COUNT", b"1", b"STREAMS", b"first", b"second", b"0", b"0",
+        ]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*2\r\n*2\r\n$5\r\nfirst\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$1\r\nf\r\n$1\r\na\r\n*2\r\n$6\r\nsecond\r\n*1\r\n*2\r\n$3\r\n1-0\r\n*2\r\n$1\r\nf\r\n$1\r\nb\r\n");
+    stream.write_all(&command(&[b"XLEN", b"first"])).unwrap();
+    read_exact_response(&mut stream, b":1\r\n");
+    stream.write_all(&command(&[b"XLEN", b"missing"])).unwrap();
+    read_exact_response(&mut stream, b":0\r\n");
+}
+
+#[test]
+fn incr_handles_missing_integer_overflow_and_wrong_type() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream.write_all(&command(&[b"INCR", b"counter"])).unwrap();
+    read_exact_response(&mut stream, b":1\r\n");
+    stream.write_all(&command(&[b"GET", b"counter"])).unwrap();
+    read_exact_response(&mut stream, b"$1\r\n1\r\n");
+    stream
+        .write_all(&command(&[b"SET", b"counter", b"9223372036854775807"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"+OK\r\n");
+    stream.write_all(&command(&[b"INCR", b"counter"])).unwrap();
+    read_exact_response(
+        &mut stream,
+        b"-ERR value is not an integer or out of range\r\n",
+    );
+    stream.write_all(&command(&[b"GET", b"counter"])).unwrap();
+    read_exact_response(&mut stream, b"$19\r\n9223372036854775807\r\n");
+    stream
+        .write_all(&command(&[b"LPUSH", b"items", b"one"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":1\r\n");
+    stream.write_all(&command(&[b"INCR", b"items"])).unwrap();
+    read_exact_response(
+        &mut stream,
+        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+    );
+}
+
+#[test]
+fn incr_preserves_existing_expiry() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream
+        .write_all(&command(&[b"SET", b"counter", b"4", b"PX", b"200"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"+OK\r\n");
+    stream.write_all(&command(&[b"INCR", b"counter"])).unwrap();
+    read_exact_response(&mut stream, b":5\r\n");
+    std::thread::sleep(std::time::Duration::from_millis(260));
+    stream.write_all(&command(&[b"GET", b"counter"])).unwrap();
+    read_exact_response(&mut stream, b"$-1\r\n");
+}

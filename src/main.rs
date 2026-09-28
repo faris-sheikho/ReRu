@@ -125,6 +125,114 @@ fn blpop_deadline(timeout: &[u8]) -> Result<Option<Instant>, Vec<u8>> {
         .ok_or_else(|| protocol::error("timeout is not a float or out of range"))
 }
 
+struct XReadOptions<'a> {
+    keys: &'a [Vec<u8>],
+    ids: &'a [Vec<u8>],
+    count: usize,
+    block: Option<Duration>,
+}
+
+fn parse_xread(command: &[Vec<u8>]) -> Result<XReadOptions<'_>, Vec<u8>> {
+    let mut index = 1;
+    let mut count = usize::MAX;
+    let mut block = None;
+    while index < command.len() && !command[index].eq_ignore_ascii_case(b"STREAMS") {
+        if index + 1 >= command.len() {
+            return Err(protocol::error("syntax error"));
+        }
+        let number = std::str::from_utf8(&command[index + 1])
+            .ok()
+            .and_then(|text| text.parse::<usize>().ok())
+            .ok_or_else(|| protocol::error("value is not an integer or out of range"))?;
+        if command[index].eq_ignore_ascii_case(b"COUNT") && number > 0 {
+            count = number;
+        } else if command[index].eq_ignore_ascii_case(b"BLOCK") {
+            block = Some(Duration::from_millis(number as u64));
+        } else {
+            return Err(protocol::error("syntax error"));
+        }
+        index += 2;
+    }
+    if index == command.len() {
+        return Err(protocol::error("syntax error"));
+    }
+    let rest = &command[index + 1..];
+    if rest.is_empty() || !rest.len().is_multiple_of(2) {
+        return Err(protocol::error("Unbalanced XREAD list of streams"));
+    }
+    let half = rest.len() / 2;
+    Ok(XReadOptions {
+        keys: &rest[..half],
+        ids: &rest[half..],
+        count,
+        block,
+    })
+}
+
+fn try_xread(
+    entries: &mut HashMap<Vec<u8>, Entry>,
+    keys: &[Vec<u8>],
+    ids: &[streams::StreamId],
+    count: usize,
+) -> Result<Option<Vec<u8>>, Vec<u8>> {
+    let mut groups = Vec::new();
+    for (key, id) in keys.iter().zip(ids) {
+        remove_expired(entries, key);
+        match entries.get(key).map(|entry| &entry.value) {
+            Some(Value::Stream(stream)) => {
+                let found = stream.after(*id, count);
+                if !found.is_empty() {
+                    groups.push((key, protocol::stream_entries(&found)));
+                }
+            }
+            Some(_) => {
+                return Err(
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                )
+            }
+            None => {}
+        }
+    }
+    if groups.is_empty() {
+        return Ok(None);
+    }
+    let mut response = format!("*{}\r\n", groups.len()).into_bytes();
+    for (key, encoded_entries) in groups {
+        response.extend_from_slice(b"*2\r\n");
+        response.extend(protocol::bulk(key));
+        response.extend(encoded_entries);
+    }
+    Ok(Some(response))
+}
+
+fn xread_ids(
+    entries: &mut HashMap<Vec<u8>, Entry>,
+    keys: &[Vec<u8>],
+    raw_ids: &[Vec<u8>],
+) -> Result<Vec<streams::StreamId>, Vec<u8>> {
+    keys.iter()
+        .zip(raw_ids)
+        .map(|(key, raw)| {
+            if raw != b"$" {
+                return streams::StreamId::parse_query(raw).map_err(protocol::error);
+            }
+            remove_expired(entries, key);
+            match entries.get(key).map(|entry| &entry.value) {
+                Some(Value::Stream(stream)) => Ok(stream.last_id()),
+                Some(_) => Err(
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                ),
+                None => Ok(streams::StreamId {
+                    milliseconds: 0,
+                    sequence: 0,
+                }),
+            }
+        })
+        .collect()
+}
+
 fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     while let Some(command) = protocol::read_command(&mut reader)? {
@@ -167,6 +275,43 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                             .to_vec()
                     }
                     None => b"$-1\r\n".to_vec(),
+                }
+            }
+        } else if command[0].eq_ignore_ascii_case(b"INCR") {
+            if command.len() != 2 {
+                protocol::error("wrong number of arguments for 'incr' command")
+            } else {
+                let mut entries = store.entries.lock().unwrap();
+                remove_expired(&mut entries, &command[1]);
+                match entries.get_mut(&command[1]) {
+                    Some(Entry {
+                        value: Value::String(value),
+                        ..
+                    }) => match std::str::from_utf8(value)
+                        .ok()
+                        .and_then(|text| text.parse::<i64>().ok())
+                        .and_then(|number| number.checked_add(1))
+                    {
+                        Some(number) => {
+                            *value = number.to_string().into_bytes();
+                            format!(":{number}\r\n").into_bytes()
+                        }
+                        None => protocol::error("value is not an integer or out of range"),
+                    },
+                    Some(_) => {
+                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                            .to_vec()
+                    }
+                    None => {
+                        entries.insert(
+                            command[1].clone(),
+                            Entry {
+                                value: Value::String(b"1".to_vec()),
+                                expires_at: None,
+                            },
+                        );
+                        b":1\r\n".to_vec()
+                    }
                 }
             }
         } else if command[0].eq_ignore_ascii_case(b"RPUSH") {
@@ -364,11 +509,11 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                     Some(Entry {
                         value: Value::Stream(stream),
                         ..
-                    }) => stream.append(&command[2], fields),
-                    Some(_) => {
-                        stream.write_all(b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")?;
-                        continue;
-                    }
+                    }) => stream.append(&command[2], fields).map_err(protocol::error),
+                    Some(_) => Err(
+                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                            .to_vec(),
+                    ),
                     None => {
                         let mut new_stream = streams::Stream::default();
                         let id = new_stream.append(&command[2], fields);
@@ -381,7 +526,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                                 },
                             );
                         }
-                        id
+                        id.map_err(protocol::error)
                     }
                 };
                 match result {
@@ -389,7 +534,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         store.changed.notify_all();
                         protocol::bulk(id.to_string().as_bytes())
                     }
-                    Err(message) => protocol::error(message),
+                    Err(response) => response,
                 }
             }
         } else if command[0].eq_ignore_ascii_case(b"XRANGE") {
@@ -419,6 +564,68 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                             None => protocol::array(&[]),
                         }
                     }
+                }
+            }
+        } else if command[0].eq_ignore_ascii_case(b"XREAD") {
+            match parse_xread(&command) {
+                Err(error) => error,
+                Ok(options) => {
+                    let mut entries = store.entries.lock().unwrap();
+                    match xread_ids(&mut entries, options.keys, options.ids) {
+                        Err(error) => error,
+                        Ok(ids) => {
+                            let deadline = match options.block {
+                                Some(duration) if !duration.is_zero() => {
+                                    Instant::now().checked_add(duration)
+                                }
+                                _ => None,
+                            };
+                            loop {
+                                match try_xread(&mut entries, options.keys, &ids, options.count) {
+                                    Err(error) => break error,
+                                    Ok(Some(response)) => break response,
+                                    Ok(None) => {}
+                                }
+                                match options.block {
+                                    None => break b"*-1\r\n".to_vec(),
+                                    Some(duration) if duration.is_zero() => {
+                                        entries = store.changed.wait(entries).unwrap()
+                                    }
+                                    Some(_) => {
+                                        let remaining =
+                                            deadline.map_or(Duration::ZERO, |deadline| {
+                                                deadline.saturating_duration_since(Instant::now())
+                                            });
+                                        if remaining.is_zero() {
+                                            break b"*-1\r\n".to_vec();
+                                        }
+                                        entries = store
+                                            .changed
+                                            .wait_timeout(entries, remaining)
+                                            .unwrap()
+                                            .0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if command[0].eq_ignore_ascii_case(b"XLEN") {
+            if command.len() != 2 {
+                protocol::error("wrong number of arguments for 'xlen' command")
+            } else {
+                let mut entries = store.entries.lock().unwrap();
+                remove_expired(&mut entries, &command[1]);
+                match entries.get(&command[1]).map(|entry| &entry.value) {
+                    Some(Value::Stream(stream)) => {
+                        format!(":{}\r\n", stream.entries.len()).into_bytes()
+                    }
+                    Some(_) => {
+                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                            .to_vec()
+                    }
+                    None => b":0\r\n".to_vec(),
                 }
             }
         } else {

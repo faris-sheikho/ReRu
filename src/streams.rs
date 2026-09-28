@@ -13,6 +13,30 @@ impl fmt::Display for StreamId {
     }
 }
 
+impl StreamId {
+    pub fn parse_query(raw: &[u8]) -> Result<Self, &'static str> {
+        let text = std::str::from_utf8(raw)
+            .map_err(|_| "Invalid stream ID specified as stream command argument")?;
+        let (milliseconds, sequence) = match text.split_once('-') {
+            Some((milliseconds, sequence)) => (milliseconds, Some(sequence)),
+            None => (text, None),
+        };
+        let milliseconds = milliseconds
+            .parse::<u64>()
+            .map_err(|_| "Invalid stream ID specified as stream command argument")?;
+        let sequence = match sequence {
+            Some(sequence) => sequence
+                .parse::<u64>()
+                .map_err(|_| "Invalid stream ID specified as stream command argument")?,
+            None => 0,
+        };
+        Ok(Self {
+            milliseconds,
+            sequence,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct StreamEntry {
     pub id: StreamId,
@@ -126,6 +150,24 @@ impl Stream {
             })
             .take(limit)
             .collect())
+    }
+
+    pub fn after(&self, id: StreamId, count: usize) -> Vec<&StreamEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.id > id)
+            .take(count)
+            .collect()
+    }
+
+    pub fn last_id(&self) -> StreamId {
+        self.entries.last().map_or(
+            StreamId {
+                milliseconds: 0,
+                sequence: 0,
+            },
+            |entry| entry.id,
+        )
     }
 }
 
