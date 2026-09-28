@@ -129,6 +129,39 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                     }
                 }
             }
+        } else if command[0].eq_ignore_ascii_case(b"LRANGE") {
+            if command.len() != 4 {
+                protocol::error("wrong number of arguments for 'lrange' command")
+            } else {
+                let indexes = [command[2].as_slice(), command[3].as_slice()].map(|bytes| {
+                    std::str::from_utf8(bytes)
+                        .ok()
+                        .and_then(|s| s.parse::<i64>().ok())
+                });
+                match indexes {
+                    [Some(start), Some(stop)] if start >= 0 && stop >= 0 => {
+                        let mut store = store.lock().unwrap();
+                        remove_expired(&mut store, &command[1]);
+                        match store.get(&command[1]).map(|entry| &entry.value) {
+                            Some(Value::List(items)) => {
+                                let start = usize::try_from(start).unwrap_or(usize::MAX);
+                                let stop = usize::try_from(stop).unwrap_or(usize::MAX);
+                                if start >= items.len() || stop < start {
+                                    protocol::array(&[])
+                                } else {
+                                    protocol::array(&items[start..=stop.min(items.len() - 1)])
+                                }
+                            }
+                            Some(Value::String(_)) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
+                            None => protocol::array(&[]),
+                        }
+                    }
+                    [Some(_), Some(_)] => {
+                        protocol::error("negative indexes are not implemented yet")
+                    }
+                    _ => protocol::error("value is not an integer or out of range"),
+                }
+            }
         } else {
             protocol::error("unknown command")
         };

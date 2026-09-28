@@ -83,3 +83,11 @@ pub fn bulk(value: &[u8]) -> Vec<u8> {
     response.extend_from_slice(b"\r\n");
     response
 }
+
+pub fn array(values: &[Vec<u8>]) -> Vec<u8> {
+    let mut response = format!("*{}\r\n", values.len()).into_bytes();
+    for value in values {
+        response.extend(bulk(value));
+    }
+    response
+}

@@ -176,3 +176,25 @@ fn rpush_accepts_multiple_elements_atomically() {
         b"-ERR wrong number of arguments for 'rpush' command\r\n",
     );
 }
+
+#[test]
+fn lrange_returns_inclusive_positive_range() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream
+        .write_all(&command(&[b"LRANGE", b"missing", b"0", b"9"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*0\r\n");
+    stream
+        .write_all(&command(&[b"RPUSH", b"items", b"a", b"b", b"c"]))
+        .unwrap();
+    read_exact_response(&mut stream, b":3\r\n");
+    stream
+        .write_all(&command(&[b"LRANGE", b"items", b"1", b"9"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*2\r\n$1\r\nb\r\n$1\r\nc\r\n");
+    stream
+        .write_all(&command(&[b"LRANGE", b"items", b"9", b"12"]))
+        .unwrap();
+    read_exact_response(&mut stream, b"*0\r\n");
+}
