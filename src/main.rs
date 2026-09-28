@@ -4,8 +4,40 @@ use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-type Store = Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>;
+struct Entry {
+    value: Vec<u8>,
+    expires_at: Option<Instant>,
+}
+
+type Store = Arc<Mutex<HashMap<Vec<u8>, Entry>>>;
+
+fn set_expiry(command: &[Vec<u8>]) -> Result<Option<Instant>, Vec<u8>> {
+    if command.len() == 3 {
+        return Ok(None);
+    }
+    if command.len() != 5 {
+        return Err(protocol::error("syntax error"));
+    }
+    let multiplier = if command[3].eq_ignore_ascii_case(b"PX") {
+        1
+    } else if command[3].eq_ignore_ascii_case(b"EX") {
+        1000
+    } else {
+        return Err(protocol::error("syntax error"));
+    };
+    let amount = std::str::from_utf8(&command[4])
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|amount| *amount > 0)
+        .and_then(|amount| amount.checked_mul(multiplier))
+        .ok_or_else(|| protocol::error("invalid expire time in 'set' command"))?;
+    let expires_at = Instant::now()
+        .checked_add(Duration::from_millis(amount))
+        .ok_or_else(|| protocol::error("invalid expire time in 'set' command"))?;
+    Ok(Some(expires_at))
+}
 
 fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -19,20 +51,32 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 protocol::bulk(&command[1])
             }
         } else if command[0].eq_ignore_ascii_case(b"SET") {
-            if command.len() != 3 {
+            if command.len() < 3 {
                 protocol::error("wrong number of arguments for 'set' command")
             } else {
-                store.lock().unwrap().insert(command[1].clone(), command[2].clone());
-                b"+OK\r\n".to_vec()
+                match set_expiry(&command) {
+                    Ok(expires_at) => {
+                        store.lock().unwrap().insert(
+                            command[1].clone(),
+                            Entry { value: command[2].clone(), expires_at },
+                        );
+                        b"+OK\r\n".to_vec()
+                    }
+                    Err(error) => error,
+                }
             }
         } else if command[0].eq_ignore_ascii_case(b"GET") {
             if command.len() != 2 {
                 protocol::error("wrong number of arguments for 'get' command")
             } else {
-                match store.lock().unwrap().get(&command[1]) {
-                    Some(value) => protocol::bulk(value),
-                    None => b"$-1\r\n".to_vec(),
+                let mut store = store.lock().unwrap();
+                if store.get(&command[1]).is_some_and(|entry| {
+                    entry.expires_at.is_some_and(|expiry| Instant::now() >= expiry)
+                }) {
+                    store.remove(&command[1]);
                 }
+                store.get(&command[1])
+                    .map_or_else(|| b"$-1\r\n".to_vec(), |entry| protocol::bulk(&entry.value))
             }
         } else {
             protocol::error("unknown command")

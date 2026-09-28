@@ -82,3 +82,23 @@ fn set_and_get_share_data_across_clients() {
     reader.write_all(&command(&[b"GET", b"key"])).unwrap();
     read_exact_response(&mut reader, b"$3\r\nnew\r\n");
 }
+
+#[test]
+fn set_px_expires_and_overwriting_clears_expiry() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    stream.write_all(&command(&[b"SET", b"temporary", b"one", b"PX", b"250"])).unwrap();
+    read_exact_response(&mut stream, b"+OK\r\n");
+    stream.write_all(&command(&[b"GET", b"temporary"])).unwrap();
+    read_exact_response(&mut stream, b"$3\r\none\r\n");
+    std::thread::sleep(std::time::Duration::from_millis(320));
+    stream.write_all(&command(&[b"GET", b"temporary"])).unwrap();
+    read_exact_response(&mut stream, b"$-1\r\n");
+    stream.write_all(&command(&[b"SET", b"temporary", b"two", b"PX", b"250"])).unwrap();
+    read_exact_response(&mut stream, b"+OK\r\n");
+    stream.write_all(&command(&[b"SET", b"temporary", b"permanent"])).unwrap();
+    read_exact_response(&mut stream, b"+OK\r\n");
+    std::thread::sleep(std::time::Duration::from_millis(320));
+    stream.write_all(&command(&[b"GET", b"temporary"])).unwrap();
+    read_exact_response(&mut stream, b"$9\r\npermanent\r\n");
+}
