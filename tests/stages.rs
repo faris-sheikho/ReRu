@@ -54,3 +54,14 @@ fn handles_clients_while_another_connection_is_idle() {
     idle.write_all(&command(&[b"PING"])).unwrap();
     read_exact_response(&mut idle, b"+PONG\r\n");
 }
+
+#[test]
+fn echoes_binary_data_across_split_tcp_writes() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    let request = command(&[b"eChO", b"hi\r\n\0there"]);
+    let mid = request.len() / 2;
+    stream.write_all(&request[..mid]).unwrap();
+    stream.write_all(&request[mid..]).unwrap();
+    read_exact_response(&mut stream, b"$10\r\nhi\r\n\0there\r\n");
+}

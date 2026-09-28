@@ -61,3 +61,10 @@ pub fn read_command<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<Vec<u8>
 pub fn error(message: &str) -> Vec<u8> {
     format!("-ERR {message}\r\n").into_bytes()
 }
+
+pub fn bulk(value: &[u8]) -> Vec<u8> {
+    let mut response = format!("${}\r\n", value.len()).into_bytes();
+    response.extend_from_slice(value);
+    response.extend_from_slice(b"\r\n");
+    response
+}

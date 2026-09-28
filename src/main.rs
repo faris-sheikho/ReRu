@@ -8,6 +8,12 @@ fn handle_client(mut stream: TcpStream) -> io::Result<()> {
     while let Some(command) = protocol::read_command(&mut reader)? {
         let response = if command[0].eq_ignore_ascii_case(b"PING") {
             b"+PONG\r\n".to_vec()
+        } else if command[0].eq_ignore_ascii_case(b"ECHO") {
+            if command.len() != 2 {
+                protocol::error("wrong number of arguments for 'echo' command")
+            } else {
+                protocol::bulk(&command[1])
+            }
         } else {
             protocol::error("unknown command")
         };
