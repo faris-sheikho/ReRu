@@ -1,9 +1,12 @@
+mod persistence;
 mod protocol;
 mod streams;
 
 use std::collections::HashMap;
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,9 +24,97 @@ struct Entry {
 struct SharedStore {
     entries: Mutex<HashMap<Vec<u8>, Entry>>,
     changed: Condvar,
+    command_gate: Mutex<()>,
+    snapshot_path: Option<PathBuf>,
+    replicas: Mutex<Vec<SyncSender<Vec<u8>>>>,
+    read_only: bool,
 }
 
 type Store = Arc<SharedStore>;
+
+fn is_mutating(command: &[Vec<u8>]) -> bool {
+    [
+        b"SET".as_slice(),
+        b"INCR",
+        b"RPUSH",
+        b"LPUSH",
+        b"LPOP",
+        b"BLPOP",
+        b"XADD",
+    ]
+    .iter()
+    .any(|name| command[0].eq_ignore_ascii_case(name))
+}
+
+fn save_and_publish(store: &Store) -> io::Result<()> {
+    if store.snapshot_path.is_none() && store.replicas.lock().unwrap().is_empty() {
+        return Ok(());
+    }
+    let bytes = persistence::encode(&store.entries.lock().unwrap())?;
+    if let Some(path) = &store.snapshot_path {
+        persistence::save(path, &bytes)?;
+    }
+    store
+        .replicas
+        .lock()
+        .unwrap()
+        .retain(|sender| sender.try_send(bytes.clone()).is_ok());
+    Ok(())
+}
+
+fn write_snapshot_frame(stream: &mut TcpStream, snapshot: &[u8]) -> io::Result<()> {
+    stream.write_all(&(snapshot.len() as u64).to_be_bytes())?;
+    stream.write_all(snapshot)
+}
+
+fn serve_replica(mut stream: TcpStream, store: &Store) -> io::Result<()> {
+    let (sender, receiver) = mpsc::sync_channel(8);
+    let initial = {
+        let _gate = store.command_gate.lock().unwrap();
+        let bytes = persistence::encode(&store.entries.lock().unwrap())?;
+        store.replicas.lock().unwrap().push(sender);
+        bytes
+    };
+    write_snapshot_frame(&mut stream, &initial)?;
+    for snapshot in receiver {
+        write_snapshot_frame(&mut stream, &snapshot)?;
+    }
+    Ok(())
+}
+
+fn follow_primary(address: String, store: Store) {
+    loop {
+        let result = (|| -> io::Result<()> {
+            let mut stream = TcpStream::connect(&address)?;
+            stream.set_nodelay(true)?;
+            stream.write_all(b"*1\r\n$8\r\nREPLSYNC\r\n")?;
+            loop {
+                let mut length = [0; 8];
+                stream.read_exact(&mut length)?;
+                let size = u64::from_be_bytes(length);
+                if size > 256 * 1024 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "replica snapshot too large",
+                    ));
+                }
+                let mut bytes = vec![0; size as usize];
+                stream.read_exact(&mut bytes)?;
+                let entries = persistence::decode(&bytes)?;
+                let _gate = store.command_gate.lock().unwrap();
+                if let Some(path) = &store.snapshot_path {
+                    persistence::save(path, &bytes)?;
+                }
+                *store.entries.lock().unwrap() = entries;
+                store.changed.notify_all();
+            }
+        })();
+        if let Err(error) = result {
+            eprintln!("replica link {address}: {error}");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
 
 fn remove_expired(store: &mut HashMap<Vec<u8>, Entry>, key: &[u8]) {
     if store.get(key).is_some_and(|entry| {
@@ -233,207 +324,205 @@ fn xread_ids(
         .collect()
 }
 
-fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
-    while let Some(command) = protocol::read_command(&mut reader)? {
-        let response = if command[0].eq_ignore_ascii_case(b"PING") {
-            b"+PONG\r\n".to_vec()
-        } else if command[0].eq_ignore_ascii_case(b"ECHO") {
-            if command.len() != 2 {
-                protocol::error("wrong number of arguments for 'echo' command")
-            } else {
-                protocol::bulk(&command[1])
+fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
+    if command[0].eq_ignore_ascii_case(b"PING") {
+        b"+PONG\r\n".to_vec()
+    } else if command[0].eq_ignore_ascii_case(b"ECHO") {
+        if command.len() != 2 {
+            protocol::error("wrong number of arguments for 'echo' command")
+        } else {
+            protocol::bulk(&command[1])
+        }
+    } else if command[0].eq_ignore_ascii_case(b"SET") {
+        if command.len() < 3 {
+            protocol::error("wrong number of arguments for 'set' command")
+        } else {
+            match set_expiry(command) {
+                Ok(expires_at) => {
+                    store.entries.lock().unwrap().insert(
+                        command[1].clone(),
+                        Entry {
+                            value: Value::String(command[2].clone()),
+                            expires_at,
+                        },
+                    );
+                    b"+OK\r\n".to_vec()
+                }
+                Err(error) => error,
             }
-        } else if command[0].eq_ignore_ascii_case(b"SET") {
-            if command.len() < 3 {
-                protocol::error("wrong number of arguments for 'set' command")
-            } else {
-                match set_expiry(&command) {
-                    Ok(expires_at) => {
-                        store.entries.lock().unwrap().insert(
-                            command[1].clone(),
-                            Entry {
-                                value: Value::String(command[2].clone()),
-                                expires_at,
-                            },
-                        );
-                        b"+OK\r\n".to_vec()
+        }
+    } else if command[0].eq_ignore_ascii_case(b"GET") {
+        if command.len() != 2 {
+            protocol::error("wrong number of arguments for 'get' command")
+        } else {
+            let mut store = store.entries.lock().unwrap();
+            remove_expired(&mut store, &command[1]);
+            match store.get(&command[1]).map(|entry| &entry.value) {
+                Some(Value::String(value)) => protocol::bulk(value),
+                Some(_) => {
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec()
+                }
+                None => b"$-1\r\n".to_vec(),
+            }
+        }
+    } else if command[0].eq_ignore_ascii_case(b"INCR") {
+        if command.len() != 2 {
+            protocol::error("wrong number of arguments for 'incr' command")
+        } else {
+            let mut entries = store.entries.lock().unwrap();
+            remove_expired(&mut entries, &command[1]);
+            match entries.get_mut(&command[1]) {
+                Some(Entry {
+                    value: Value::String(value),
+                    ..
+                }) => match std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|text| text.parse::<i64>().ok())
+                    .and_then(|number| number.checked_add(1))
+                {
+                    Some(number) => {
+                        *value = number.to_string().into_bytes();
+                        format!(":{number}\r\n").into_bytes()
                     }
-                    Err(error) => error,
+                    None => protocol::error("value is not an integer or out of range"),
+                },
+                Some(_) => {
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec()
+                }
+                None => {
+                    entries.insert(
+                        command[1].clone(),
+                        Entry {
+                            value: Value::String(b"1".to_vec()),
+                            expires_at: None,
+                        },
+                    );
+                    b":1\r\n".to_vec()
                 }
             }
-        } else if command[0].eq_ignore_ascii_case(b"GET") {
-            if command.len() != 2 {
-                protocol::error("wrong number of arguments for 'get' command")
-            } else {
-                let mut store = store.entries.lock().unwrap();
-                remove_expired(&mut store, &command[1]);
-                match store.get(&command[1]).map(|entry| &entry.value) {
-                    Some(Value::String(value)) => protocol::bulk(value),
-                    Some(_) => {
-                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                            .to_vec()
-                    }
-                    None => b"$-1\r\n".to_vec(),
+        }
+    } else if command[0].eq_ignore_ascii_case(b"RPUSH") {
+        if command.len() < 3 {
+            protocol::error("wrong number of arguments for 'rpush' command")
+        } else {
+            let changed = &store.changed;
+            let mut store = store.entries.lock().unwrap();
+            remove_expired(&mut store, &command[1]);
+            match store.get_mut(&command[1]) {
+                Some(Entry {
+                    value: Value::List(items),
+                    ..
+                }) => {
+                    items.extend_from_slice(&command[2..]);
+                    changed.notify_all();
+                    format!(":{}\r\n", items.len()).into_bytes()
+                }
+                Some(_) => {
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec()
+                }
+                None => {
+                    store.insert(
+                        command[1].clone(),
+                        Entry {
+                            value: Value::List(command[2..].to_vec()),
+                            expires_at: None,
+                        },
+                    );
+                    changed.notify_all();
+                    format!(":{}\r\n", command.len() - 2).into_bytes()
                 }
             }
-        } else if command[0].eq_ignore_ascii_case(b"INCR") {
-            if command.len() != 2 {
-                protocol::error("wrong number of arguments for 'incr' command")
-            } else {
-                let mut entries = store.entries.lock().unwrap();
-                remove_expired(&mut entries, &command[1]);
-                match entries.get_mut(&command[1]) {
-                    Some(Entry {
-                        value: Value::String(value),
-                        ..
-                    }) => match std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|text| text.parse::<i64>().ok())
-                        .and_then(|number| number.checked_add(1))
-                    {
-                        Some(number) => {
-                            *value = number.to_string().into_bytes();
-                            format!(":{number}\r\n").into_bytes()
-                        }
-                        None => protocol::error("value is not an integer or out of range"),
-                    },
-                    Some(_) => {
-                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                            .to_vec()
-                    }
-                    None => {
-                        entries.insert(
-                            command[1].clone(),
-                            Entry {
-                                value: Value::String(b"1".to_vec()),
-                                expires_at: None,
-                            },
-                        );
-                        b":1\r\n".to_vec()
-                    }
-                }
-            }
-        } else if command[0].eq_ignore_ascii_case(b"RPUSH") {
-            if command.len() < 3 {
-                protocol::error("wrong number of arguments for 'rpush' command")
-            } else {
-                let changed = &store.changed;
-                let mut store = store.entries.lock().unwrap();
-                remove_expired(&mut store, &command[1]);
-                match store.get_mut(&command[1]) {
-                    Some(Entry {
-                        value: Value::List(items),
-                        ..
-                    }) => {
-                        items.extend_from_slice(&command[2..]);
-                        changed.notify_all();
-                        format!(":{}\r\n", items.len()).into_bytes()
-                    }
-                    Some(_) => {
-                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                            .to_vec()
-                    }
-                    None => {
-                        store.insert(
-                            command[1].clone(),
-                            Entry {
-                                value: Value::List(command[2..].to_vec()),
-                                expires_at: None,
-                            },
-                        );
-                        changed.notify_all();
-                        format!(":{}\r\n", command.len() - 2).into_bytes()
-                    }
-                }
-            }
-        } else if command[0].eq_ignore_ascii_case(b"LRANGE") {
-            if command.len() != 4 {
-                protocol::error("wrong number of arguments for 'lrange' command")
-            } else {
-                let indexes = [command[2].as_slice(), command[3].as_slice()].map(|bytes| {
-                    std::str::from_utf8(bytes)
-                        .ok()
-                        .and_then(|s| s.parse::<i64>().ok())
-                });
-                match indexes {
-                    [Some(start), Some(stop)] => {
-                        let mut store = store.entries.lock().unwrap();
-                        remove_expired(&mut store, &command[1]);
-                        match store.get(&command[1]).map(|entry| &entry.value) {
+        }
+    } else if command[0].eq_ignore_ascii_case(b"LRANGE") {
+        if command.len() != 4 {
+            protocol::error("wrong number of arguments for 'lrange' command")
+        } else {
+            let indexes = [command[2].as_slice(), command[3].as_slice()].map(|bytes| {
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+            });
+            match indexes {
+                [Some(start), Some(stop)] => {
+                    let mut store = store.entries.lock().unwrap();
+                    remove_expired(&mut store, &command[1]);
+                    match store.get(&command[1]).map(|entry| &entry.value) {
                             Some(Value::List(items)) => list_range(items, start, stop),
                             Some(_) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
                             None => protocol::array(&[]),
                         }
-                    }
-                    _ => protocol::error("value is not an integer or out of range"),
+                }
+                _ => protocol::error("value is not an integer or out of range"),
+            }
+        }
+    } else if command[0].eq_ignore_ascii_case(b"LPUSH") {
+        if command.len() < 3 {
+            protocol::error("wrong number of arguments for 'lpush' command")
+        } else {
+            let changed = &store.changed;
+            let mut store = store.entries.lock().unwrap();
+            remove_expired(&mut store, &command[1]);
+            match store.get_mut(&command[1]) {
+                Some(Entry {
+                    value: Value::List(items),
+                    ..
+                }) => {
+                    items.splice(0..0, command[2..].iter().rev().cloned());
+                    changed.notify_all();
+                    format!(":{}\r\n", items.len()).into_bytes()
+                }
+                Some(_) => {
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec()
+                }
+                None => {
+                    store.insert(
+                        command[1].clone(),
+                        Entry {
+                            value: Value::List(command[2..].iter().rev().cloned().collect()),
+                            expires_at: None,
+                        },
+                    );
+                    changed.notify_all();
+                    format!(":{}\r\n", command.len() - 2).into_bytes()
                 }
             }
-        } else if command[0].eq_ignore_ascii_case(b"LPUSH") {
-            if command.len() < 3 {
-                protocol::error("wrong number of arguments for 'lpush' command")
-            } else {
-                let changed = &store.changed;
-                let mut store = store.entries.lock().unwrap();
-                remove_expired(&mut store, &command[1]);
-                match store.get_mut(&command[1]) {
-                    Some(Entry {
-                        value: Value::List(items),
-                        ..
-                    }) => {
-                        items.splice(0..0, command[2..].iter().rev().cloned());
-                        changed.notify_all();
-                        format!(":{}\r\n", items.len()).into_bytes()
-                    }
-                    Some(_) => {
-                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                            .to_vec()
-                    }
-                    None => {
-                        store.insert(
-                            command[1].clone(),
-                            Entry {
-                                value: Value::List(command[2..].iter().rev().cloned().collect()),
-                                expires_at: None,
-                            },
-                        );
-                        changed.notify_all();
-                        format!(":{}\r\n", command.len() - 2).into_bytes()
-                    }
+        }
+    } else if command[0].eq_ignore_ascii_case(b"LLEN") {
+        if command.len() != 2 {
+            protocol::error("wrong number of arguments for 'llen' command")
+        } else {
+            let mut store = store.entries.lock().unwrap();
+            remove_expired(&mut store, &command[1]);
+            match store.get(&command[1]).map(|entry| &entry.value) {
+                Some(Value::List(items)) => format!(":{}\r\n", items.len()).into_bytes(),
+                Some(_) => {
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec()
                 }
+                None => b":0\r\n".to_vec(),
             }
-        } else if command[0].eq_ignore_ascii_case(b"LLEN") {
-            if command.len() != 2 {
-                protocol::error("wrong number of arguments for 'llen' command")
+        }
+    } else if command[0].eq_ignore_ascii_case(b"LPOP") {
+        if command.len() != 2 && command.len() != 3 {
+            protocol::error("wrong number of arguments for 'lpop' command")
+        } else {
+            let count = if command.len() == 3 {
+                std::str::from_utf8(&command[2])
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
             } else {
-                let mut store = store.entries.lock().unwrap();
-                remove_expired(&mut store, &command[1]);
-                match store.get(&command[1]).map(|entry| &entry.value) {
-                    Some(Value::List(items)) => format!(":{}\r\n", items.len()).into_bytes(),
-                    Some(_) => {
-                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                            .to_vec()
-                    }
-                    None => b":0\r\n".to_vec(),
-                }
-            }
-        } else if command[0].eq_ignore_ascii_case(b"LPOP") {
-            if command.len() != 2 && command.len() != 3 {
-                protocol::error("wrong number of arguments for 'lpop' command")
-            } else {
-                let count = if command.len() == 3 {
-                    std::str::from_utf8(&command[2])
-                        .ok()
-                        .and_then(|s| s.parse::<usize>().ok())
-                } else {
-                    Some(1)
-                };
-                match count {
-                    None => protocol::error("value is not an integer or out of range"),
-                    Some(count) => {
-                        let mut store = store.entries.lock().unwrap();
-                        remove_expired(&mut store, &command[1]);
-                        match store.get_mut(&command[1]) {
+                Some(1)
+            };
+            match count {
+                None => protocol::error("value is not an integer or out of range"),
+                Some(count) => {
+                    let mut store = store.entries.lock().unwrap();
+                    remove_expired(&mut store, &command[1]);
+                    match store.get_mut(&command[1]) {
                             Some(Entry { value: Value::List(items), .. }) => {
                                 if count == 0 {
                                     b"*-1\r\n".to_vec()
@@ -453,109 +542,112 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                             Some(_) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
                             None => b"$-1\r\n".to_vec(),
                         }
-                    }
                 }
             }
-        } else if command[0].eq_ignore_ascii_case(b"BLPOP") {
-            if command.len() < 3 {
-                protocol::error("wrong number of arguments for 'blpop' command")
-            } else {
-                match blpop_deadline(command.last().unwrap()) {
-                    Err(error) => error,
-                    Ok(deadline) => {
-                        let keys = &command[1..command.len() - 1];
+        }
+    } else if command[0].eq_ignore_ascii_case(b"BLPOP") {
+        if command.len() < 3 {
+            protocol::error("wrong number of arguments for 'blpop' command")
+        } else {
+            match blpop_deadline(command.last().unwrap()) {
+                Err(error) => error,
+                Ok(deadline) => {
+                    let keys = &command[1..command.len() - 1];
+                    loop {
+                        let gate = allow_blocking.then(|| store.command_gate.lock().unwrap());
                         let mut entries = store.entries.lock().unwrap();
-                        loop {
-                            if let Some(response) = try_blpop(&mut entries, keys) {
-                                break response;
-                            }
-                            match deadline {
-                                Some(deadline) => {
-                                    let remaining =
-                                        deadline.saturating_duration_since(Instant::now());
-                                    if remaining.is_zero() {
-                                        break b"*-1\r\n".to_vec();
-                                    }
-                                    entries =
-                                        store.changed.wait_timeout(entries, remaining).unwrap().0;
+                        if let Some(response) = try_blpop(&mut entries, keys) {
+                            break response;
+                        }
+                        if !allow_blocking {
+                            break b"*-1\r\n".to_vec();
+                        }
+                        drop(gate);
+                        match deadline {
+                            Some(deadline) => {
+                                let remaining = deadline.saturating_duration_since(Instant::now());
+                                if remaining.is_zero() {
+                                    break b"*-1\r\n".to_vec();
                                 }
-                                None => entries = store.changed.wait(entries).unwrap(),
+                                entries = store.changed.wait_timeout(entries, remaining).unwrap().0;
                             }
+                            None => entries = store.changed.wait(entries).unwrap(),
                         }
+                        drop(entries);
                     }
                 }
             }
-        } else if command[0].eq_ignore_ascii_case(b"TYPE") {
-            if command.len() != 2 {
-                protocol::error("wrong number of arguments for 'type' command")
-            } else {
-                let mut entries = store.entries.lock().unwrap();
-                remove_expired(&mut entries, &command[1]);
-                match entries.get(&command[1]).map(|entry| &entry.value) {
-                    Some(Value::String(_)) => b"+string\r\n".to_vec(),
-                    Some(Value::List(_)) => b"+list\r\n".to_vec(),
-                    Some(Value::Stream(_)) => b"+stream\r\n".to_vec(),
-                    None => b"+none\r\n".to_vec(),
-                }
+        }
+    } else if command[0].eq_ignore_ascii_case(b"TYPE") {
+        if command.len() != 2 {
+            protocol::error("wrong number of arguments for 'type' command")
+        } else {
+            let mut entries = store.entries.lock().unwrap();
+            remove_expired(&mut entries, &command[1]);
+            match entries.get(&command[1]).map(|entry| &entry.value) {
+                Some(Value::String(_)) => b"+string\r\n".to_vec(),
+                Some(Value::List(_)) => b"+list\r\n".to_vec(),
+                Some(Value::Stream(_)) => b"+stream\r\n".to_vec(),
+                None => b"+none\r\n".to_vec(),
             }
-        } else if command[0].eq_ignore_ascii_case(b"XADD") {
-            if command.len() < 5 || command.len() % 2 == 0 {
-                protocol::error("wrong number of arguments for 'xadd' command")
-            } else {
-                let mut entries = store.entries.lock().unwrap();
-                remove_expired(&mut entries, &command[1]);
-                let fields = command[3..].to_vec();
-                let result = match entries.get_mut(&command[1]) {
-                    Some(Entry {
-                        value: Value::Stream(stream),
-                        ..
-                    }) => stream.append(&command[2], fields).map_err(protocol::error),
-                    Some(_) => Err(
-                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                            .to_vec(),
-                    ),
-                    None => {
-                        let mut new_stream = streams::Stream::default();
-                        let id = new_stream.append(&command[2], fields);
-                        if id.is_ok() {
-                            entries.insert(
-                                command[1].clone(),
-                                Entry {
-                                    value: Value::Stream(new_stream),
-                                    expires_at: None,
-                                },
-                            );
-                        }
-                        id.map_err(protocol::error)
+        }
+    } else if command[0].eq_ignore_ascii_case(b"XADD") {
+        if command.len() < 5 || command.len().is_multiple_of(2) {
+            protocol::error("wrong number of arguments for 'xadd' command")
+        } else {
+            let mut entries = store.entries.lock().unwrap();
+            remove_expired(&mut entries, &command[1]);
+            let fields = command[3..].to_vec();
+            let result = match entries.get_mut(&command[1]) {
+                Some(Entry {
+                    value: Value::Stream(stream),
+                    ..
+                }) => stream.append(&command[2], fields).map_err(protocol::error),
+                Some(_) => Err(
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                ),
+                None => {
+                    let mut new_stream = streams::Stream::default();
+                    let id = new_stream.append(&command[2], fields);
+                    if id.is_ok() {
+                        entries.insert(
+                            command[1].clone(),
+                            Entry {
+                                value: Value::Stream(new_stream),
+                                expires_at: None,
+                            },
+                        );
                     }
-                };
-                match result {
-                    Ok(id) => {
-                        store.changed.notify_all();
-                        protocol::bulk(id.to_string().as_bytes())
-                    }
-                    Err(response) => response,
+                    id.map_err(protocol::error)
                 }
+            };
+            match result {
+                Ok(id) => {
+                    store.changed.notify_all();
+                    protocol::bulk(id.to_string().as_bytes())
+                }
+                Err(response) => response,
             }
-        } else if command[0].eq_ignore_ascii_case(b"XRANGE") {
-            if command.len() != 4
-                && (command.len() != 6 || !command[4].eq_ignore_ascii_case(b"COUNT"))
-            {
-                protocol::error("wrong number of arguments for 'xrange' command")
+        }
+    } else if command[0].eq_ignore_ascii_case(b"XRANGE") {
+        if command.len() != 4 && (command.len() != 6 || !command[4].eq_ignore_ascii_case(b"COUNT"))
+        {
+            protocol::error("wrong number of arguments for 'xrange' command")
+        } else {
+            let count = if command.len() == 6 {
+                std::str::from_utf8(&command[5])
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
             } else {
-                let count = if command.len() == 6 {
-                    std::str::from_utf8(&command[5])
-                        .ok()
-                        .and_then(|s| s.parse::<usize>().ok())
-                } else {
-                    Some(usize::MAX)
-                };
-                match count {
-                    None => protocol::error("value is not an integer or out of range"),
-                    Some(count) => {
-                        let mut entries = store.entries.lock().unwrap();
-                        remove_expired(&mut entries, &command[1]);
-                        match entries.get(&command[1]).map(|entry| &entry.value) {
+                Some(usize::MAX)
+            };
+            match count {
+                None => protocol::error("value is not an integer or out of range"),
+                Some(count) => {
+                    let mut entries = store.entries.lock().unwrap();
+                    remove_expired(&mut entries, &command[1]);
+                    match entries.get(&command[1]).map(|entry| &entry.value) {
                             Some(Value::Stream(stream)) => match stream.range(&command[2], &command[3], Some(count)) {
                                 Ok(found) => protocol::stream_entries(&found),
                                 Err(message) => protocol::error(message),
@@ -563,73 +655,212 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                             Some(_) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
                             None => protocol::array(&[]),
                         }
-                    }
                 }
             }
-        } else if command[0].eq_ignore_ascii_case(b"XREAD") {
-            match parse_xread(&command) {
-                Err(error) => error,
-                Ok(options) => {
-                    let mut entries = store.entries.lock().unwrap();
-                    match xread_ids(&mut entries, options.keys, options.ids) {
-                        Err(error) => error,
-                        Ok(ids) => {
-                            let deadline = match options.block {
-                                Some(duration) if !duration.is_zero() => {
-                                    Instant::now().checked_add(duration)
+        }
+    } else if command[0].eq_ignore_ascii_case(b"XREAD") {
+        match parse_xread(command) {
+            Err(error) => error,
+            Ok(options) => {
+                let mut gate = allow_blocking.then(|| store.command_gate.lock().unwrap());
+                let mut entries = store.entries.lock().unwrap();
+                match xread_ids(&mut entries, options.keys, options.ids) {
+                    Err(error) => error,
+                    Ok(ids) => {
+                        let deadline = match options.block {
+                            Some(duration) if !duration.is_zero() => {
+                                Instant::now().checked_add(duration)
+                            }
+                            _ => None,
+                        };
+                        loop {
+                            match try_xread(&mut entries, options.keys, &ids, options.count) {
+                                Err(error) => break error,
+                                Ok(Some(response)) => break response,
+                                Ok(None) => {}
+                            }
+                            if !allow_blocking {
+                                break b"*-1\r\n".to_vec();
+                            }
+                            if options.block.is_some() {
+                                drop(gate.take());
+                            }
+                            match options.block {
+                                None => break b"*-1\r\n".to_vec(),
+                                Some(duration) if duration.is_zero() => {
+                                    entries = store.changed.wait(entries).unwrap()
                                 }
-                                _ => None,
-                            };
-                            loop {
-                                match try_xread(&mut entries, options.keys, &ids, options.count) {
-                                    Err(error) => break error,
-                                    Ok(Some(response)) => break response,
-                                    Ok(None) => {}
-                                }
-                                match options.block {
-                                    None => break b"*-1\r\n".to_vec(),
-                                    Some(duration) if duration.is_zero() => {
-                                        entries = store.changed.wait(entries).unwrap()
+                                Some(_) => {
+                                    let remaining = deadline.map_or(Duration::ZERO, |deadline| {
+                                        deadline.saturating_duration_since(Instant::now())
+                                    });
+                                    if remaining.is_zero() {
+                                        break b"*-1\r\n".to_vec();
                                     }
-                                    Some(_) => {
-                                        let remaining =
-                                            deadline.map_or(Duration::ZERO, |deadline| {
-                                                deadline.saturating_duration_since(Instant::now())
-                                            });
-                                        if remaining.is_zero() {
-                                            break b"*-1\r\n".to_vec();
-                                        }
-                                        entries = store
-                                            .changed
-                                            .wait_timeout(entries, remaining)
-                                            .unwrap()
-                                            .0;
-                                    }
+                                    entries =
+                                        store.changed.wait_timeout(entries, remaining).unwrap().0;
                                 }
                             }
+                            drop(entries);
+                            gate = allow_blocking.then(|| store.command_gate.lock().unwrap());
+                            entries = store.entries.lock().unwrap();
                         }
                     }
                 }
             }
-        } else if command[0].eq_ignore_ascii_case(b"XLEN") {
-            if command.len() != 2 {
-                protocol::error("wrong number of arguments for 'xlen' command")
+        }
+    } else if command[0].eq_ignore_ascii_case(b"XLEN") {
+        if command.len() != 2 {
+            protocol::error("wrong number of arguments for 'xlen' command")
+        } else {
+            let mut entries = store.entries.lock().unwrap();
+            remove_expired(&mut entries, &command[1]);
+            match entries.get(&command[1]).map(|entry| &entry.value) {
+                Some(Value::Stream(stream)) => {
+                    format!(":{}\r\n", stream.entries.len()).into_bytes()
+                }
+                Some(_) => {
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec()
+                }
+                None => b":0\r\n".to_vec(),
+            }
+        }
+    } else {
+        protocol::error("unknown command")
+    }
+}
+
+fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
+    let name = &command[0];
+    let arity = command.len();
+    let valid = if name.eq_ignore_ascii_case(b"PING") {
+        arity <= 2
+    } else if name.eq_ignore_ascii_case(b"ECHO")
+        || name.eq_ignore_ascii_case(b"GET")
+        || name.eq_ignore_ascii_case(b"INCR")
+        || name.eq_ignore_ascii_case(b"LLEN")
+        || name.eq_ignore_ascii_case(b"TYPE")
+        || name.eq_ignore_ascii_case(b"XLEN")
+    {
+        arity == 2
+    } else if name.eq_ignore_ascii_case(b"SET") {
+        arity == 3 || arity == 5
+    } else if name.eq_ignore_ascii_case(b"RPUSH")
+        || name.eq_ignore_ascii_case(b"LPUSH")
+        || name.eq_ignore_ascii_case(b"BLPOP")
+    {
+        arity >= 3
+    } else if name.eq_ignore_ascii_case(b"LRANGE") {
+        arity == 4
+    } else if name.eq_ignore_ascii_case(b"LPOP") {
+        arity == 2 || arity == 3
+    } else if name.eq_ignore_ascii_case(b"XADD") {
+        arity >= 5 && arity % 2 == 1
+    } else if name.eq_ignore_ascii_case(b"XRANGE") {
+        arity == 4 || (arity == 6 && command[4].eq_ignore_ascii_case(b"COUNT"))
+    } else if name.eq_ignore_ascii_case(b"XREAD") {
+        return parse_xread(command).map(|_| ());
+    } else {
+        return Err(protocol::error("unknown command"));
+    };
+    if valid {
+        Ok(())
+    } else {
+        let lower = String::from_utf8_lossy(name).to_ascii_lowercase();
+        Err(protocol::error(&format!(
+            "wrong number of arguments for '{lower}' command"
+        )))
+    }
+}
+
+fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut transaction: Option<Vec<Vec<Vec<u8>>>> = None;
+    let mut transaction_error = false;
+    while let Some(command) = protocol::read_command(&mut reader)? {
+        if command[0].eq_ignore_ascii_case(b"REPLSYNC") && !store.read_only {
+            if command.len() != 1 {
+                stream.write_all(&protocol::error(
+                    "wrong number of arguments for 'replsync' command",
+                ))?;
+                continue;
+            }
+            return serve_replica(stream, &store);
+        }
+        let response = if store.read_only && is_mutating(&command) {
+            if transaction.is_some() {
+                transaction_error = true;
+            }
+            b"-READONLY You can't write against a read only replica.\r\n".to_vec()
+        } else if command[0].eq_ignore_ascii_case(b"MULTI") {
+            if command.len() != 1 {
+                protocol::error("wrong number of arguments for 'multi' command")
+            } else if transaction.is_some() {
+                protocol::error("MULTI calls can not be nested")
             } else {
-                let mut entries = store.entries.lock().unwrap();
-                remove_expired(&mut entries, &command[1]);
-                match entries.get(&command[1]).map(|entry| &entry.value) {
-                    Some(Value::Stream(stream)) => {
-                        format!(":{}\r\n", stream.entries.len()).into_bytes()
+                transaction = Some(Vec::new());
+                transaction_error = false;
+                b"+OK\r\n".to_vec()
+            }
+        } else if command[0].eq_ignore_ascii_case(b"DISCARD") {
+            if command.len() != 1 {
+                protocol::error("wrong number of arguments for 'discard' command")
+            } else if transaction.take().is_some() {
+                transaction_error = false;
+                b"+OK\r\n".to_vec()
+            } else {
+                protocol::error("DISCARD without MULTI")
+            }
+        } else if command[0].eq_ignore_ascii_case(b"EXEC") {
+            if command.len() != 1 {
+                protocol::error("wrong number of arguments for 'exec' command")
+            } else if let Some(queued) = transaction.take() {
+                if transaction_error {
+                    transaction_error = false;
+                    b"-EXECABORT Transaction discarded because of previous errors.\r\n".to_vec()
+                } else {
+                    let _gate = store.command_gate.lock().unwrap();
+                    let mut response = format!("*{}\r\n", queued.len()).into_bytes();
+                    let writes = queued.iter().any(|command| is_mutating(command));
+                    for queued_command in queued {
+                        response.extend(execute_command(&queued_command, &store, false));
                     }
-                    Some(_) => {
-                        b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                            .to_vec()
+                    if writes {
+                        save_and_publish(&store)?;
                     }
-                    None => b":0\r\n".to_vec(),
+                    response
+                }
+            } else {
+                protocol::error("EXEC without MULTI")
+            }
+        } else if let Some(queued) = transaction.as_mut() {
+            match validate_queued(&command) {
+                Ok(()) => {
+                    queued.push(command);
+                    b"+QUEUED\r\n".to_vec()
+                }
+                Err(error) => {
+                    transaction_error = true;
+                    error
                 }
             }
+        } else if command[0].eq_ignore_ascii_case(b"BLPOP")
+            || command[0].eq_ignore_ascii_case(b"XREAD")
+        {
+            let response = execute_command(&command, &store, true);
+            if is_mutating(&command) {
+                let _gate = store.command_gate.lock().unwrap();
+                save_and_publish(&store)?;
+            }
+            response
         } else {
-            protocol::error("unknown command")
+            let _gate = store.command_gate.lock().unwrap();
+            let response = execute_command(&command, &store, true);
+            if is_mutating(&command) {
+                save_and_publish(&store)?;
+            }
+            response
         };
         stream.write_all(&response)?;
     }
@@ -638,24 +869,65 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let port = match args.as_slice() {
-        [_] => 6379,
-        [_, flag, value] if flag == "--port" => value.parse::<u16>().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "--port must be a valid port")
-        })?,
-        _ => {
-            return Err(io::Error::new(
+    let mut port = 6379;
+    let mut snapshot_path = None;
+    let mut replica_of = None;
+    let mut index = 1;
+    while index < args.len() {
+        let value = args.get(index + 1).ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: reru [--port PORT]",
-            ))
+                "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT]",
+            )
+        })?;
+        match args[index].as_str() {
+            "--port" => {
+                port = value.parse::<u16>().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--port must be a valid port")
+                })?
+            }
+            "--snapshot" => snapshot_path = Some(PathBuf::from(value)),
+            "--replicaof" => {
+                let upstream_port = args
+                    .get(index + 2)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "missing replica port")
+                    })?
+                    .parse::<u16>()
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid replica port")
+                    })?;
+                replica_of = Some(format!("{value}:{upstream_port}"));
+                index += 1;
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT]",
+                ))
+            }
         }
-    };
+        index += 2;
+    }
 
     let listener = TcpListener::bind(("127.0.0.1", port))?;
+    let entries = if let Some(path) = &snapshot_path {
+        persistence::load(path)?
+    } else {
+        HashMap::new()
+    };
     let store: Store = Arc::new(SharedStore {
-        entries: Mutex::new(HashMap::new()),
+        entries: Mutex::new(entries),
         changed: Condvar::new(),
+        command_gate: Mutex::new(()),
+        snapshot_path,
+        replicas: Mutex::new(Vec::new()),
+        read_only: replica_of.is_some(),
     });
+    if let Some(address) = replica_of {
+        let replica_store = Arc::clone(&store);
+        std::thread::spawn(move || follow_primary(address, replica_store));
+    }
     eprintln!("ReRu listening on 127.0.0.1:{port}");
     for stream in listener.incoming() {
         let stream = stream?;

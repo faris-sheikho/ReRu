@@ -570,3 +570,195 @@ fn incr_preserves_existing_expiry() {
     stream.write_all(&command(&[b"GET", b"counter"])).unwrap();
     read_exact_response(&mut stream, b"$-1\r\n");
 }
+
+#[test]
+fn multi_exec_queues_and_returns_results() {
+    let server = common::Server::start();
+    let mut client = server.connect().unwrap();
+    let mut observer = server.connect().unwrap();
+    client.write_all(&command(&[b"MULTI"])).unwrap();
+    read_exact_response(&mut client, b"+OK\r\n");
+    client
+        .write_all(&command(&[b"SET", b"counter", b"4"]))
+        .unwrap();
+    read_exact_response(&mut client, b"+QUEUED\r\n");
+    client.write_all(&command(&[b"INCR", b"counter"])).unwrap();
+    read_exact_response(&mut client, b"+QUEUED\r\n");
+    observer.write_all(&command(&[b"GET", b"counter"])).unwrap();
+    read_exact_response(&mut observer, b"$-1\r\n");
+    client.write_all(&command(&[b"EXEC"])).unwrap();
+    read_exact_response(&mut client, b"*2\r\n+OK\r\n:5\r\n");
+    observer.write_all(&command(&[b"GET", b"counter"])).unwrap();
+    read_exact_response(&mut observer, b"$1\r\n5\r\n");
+    client.write_all(&command(&[b"MULTI"])).unwrap();
+    read_exact_response(&mut client, b"+OK\r\n");
+    client.write_all(&command(&[b"EXEC"])).unwrap();
+    read_exact_response(&mut client, b"*0\r\n");
+}
+
+#[test]
+fn discard_and_queue_time_error_abort_transaction() {
+    let server = common::Server::start();
+    let mut client = server.connect().unwrap();
+    client.write_all(&command(&[b"MULTI"])).unwrap();
+    read_exact_response(&mut client, b"+OK\r\n");
+    client
+        .write_all(&command(&[b"SET", b"key", b"value"]))
+        .unwrap();
+    read_exact_response(&mut client, b"+QUEUED\r\n");
+    client.write_all(&command(&[b"DISCARD"])).unwrap();
+    read_exact_response(&mut client, b"+OK\r\n");
+    client.write_all(&command(&[b"GET", b"key"])).unwrap();
+    read_exact_response(&mut client, b"$-1\r\n");
+    client.write_all(&command(&[b"MULTI"])).unwrap();
+    read_exact_response(&mut client, b"+OK\r\n");
+    client
+        .write_all(&command(&[b"SET", b"key", b"value"]))
+        .unwrap();
+    read_exact_response(&mut client, b"+QUEUED\r\n");
+    client.write_all(&command(&[b"UNKNOWN"])).unwrap();
+    read_exact_response(&mut client, b"-ERR unknown command\r\n");
+    client.write_all(&command(&[b"EXEC"])).unwrap();
+    read_exact_response(
+        &mut client,
+        b"-EXECABORT Transaction discarded because of previous errors.\r\n",
+    );
+    client.write_all(&command(&[b"GET", b"key"])).unwrap();
+    read_exact_response(&mut client, b"$-1\r\n");
+}
+
+#[test]
+fn exec_keeps_running_after_a_runtime_error() {
+    let server = common::Server::start();
+    let mut client = server.connect().unwrap();
+    client
+        .write_all(&command(&[b"RPUSH", b"items", b"one"]))
+        .unwrap();
+    read_exact_response(&mut client, b":1\r\n");
+    client.write_all(&command(&[b"MULTI"])).unwrap();
+    read_exact_response(&mut client, b"+OK\r\n");
+    client.write_all(&command(&[b"GET", b"items"])).unwrap();
+    read_exact_response(&mut client, b"+QUEUED\r\n");
+    client
+        .write_all(&command(&[b"SET", b"later", b"yes"]))
+        .unwrap();
+    read_exact_response(&mut client, b"+QUEUED\r\n");
+    client.write_all(&command(&[b"EXEC"])).unwrap();
+    read_exact_response(
+        &mut client,
+        b"*2\r\n-WRONGTYPE Operation against a key holding the wrong kind of value\r\n+OK\r\n",
+    );
+    client.write_all(&command(&[b"GET", b"later"])).unwrap();
+    read_exact_response(&mut client, b"$3\r\nyes\r\n");
+}
+
+#[test]
+fn snapshot_recovers_strings_lists_streams_and_absolute_expiry() {
+    let directory = std::env::temp_dir().join(format!(
+        "reru-snapshot-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("store.snap");
+    let path_text = path.to_str().unwrap();
+    {
+        let server = common::Server::start_with(&["--snapshot", path_text]);
+        let mut client = server.connect().unwrap();
+        client
+            .write_all(&command(&[b"SET", b"name", b"mansi"]))
+            .unwrap();
+        read_exact_response(&mut client, b"+OK\r\n");
+        client
+            .write_all(&command(&[b"RPUSH", b"items", b"a", b"b"]))
+            .unwrap();
+        read_exact_response(&mut client, b":2\r\n");
+        client
+            .write_all(&command(&[b"XADD", b"events", b"1-0", b"f", b"v"]))
+            .unwrap();
+        read_exact_response(&mut client, b"$3\r\n1-0\r\n");
+        client
+            .write_all(&command(&[b"SET", b"short", b"value", b"PX", b"200"]))
+            .unwrap();
+        read_exact_response(&mut client, b"+OK\r\n");
+    }
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    {
+        let server = common::Server::start_with(&["--snapshot", path_text]);
+        let mut client = server.connect().unwrap();
+        client.write_all(&command(&[b"GET", b"name"])).unwrap();
+        read_exact_response(&mut client, b"$5\r\nmansi\r\n");
+        client
+            .write_all(&command(&[b"LRANGE", b"items", b"0", b"-1"]))
+            .unwrap();
+        read_exact_response(&mut client, b"*2\r\n$1\r\na\r\n$1\r\nb\r\n");
+        client.write_all(&command(&[b"XLEN", b"events"])).unwrap();
+        read_exact_response(&mut client, b":1\r\n");
+        client.write_all(&command(&[b"GET", b"short"])).unwrap();
+        read_exact_response(&mut client, b"$-1\r\n");
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn get_value(server: &common::Server, key: &[u8]) -> Option<Vec<u8>> {
+    use std::io::BufRead;
+    let mut client = server.connect().unwrap();
+    client.write_all(&command(&[b"GET", key])).unwrap();
+    let mut reader = std::io::BufReader::new(client);
+    let mut header = String::new();
+    reader.read_line(&mut header).unwrap();
+    if header == "$-1\r\n" {
+        return None;
+    }
+    let len = header
+        .trim_end()
+        .strip_prefix('$')
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let mut value = vec![0; len + 2];
+    reader.read_exact(&mut value).unwrap();
+    assert!(value.ends_with(b"\r\n"));
+    value.truncate(len);
+    Some(value)
+}
+
+fn wait_for_value(server: &common::Server, key: &[u8], expected: &[u8]) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if get_value(server, key).as_deref() == Some(expected) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("replica did not receive expected value");
+}
+
+#[test]
+fn replica_receives_initial_snapshot_and_later_writes() {
+    let primary = common::Server::start();
+    let mut writer = primary.connect().unwrap();
+    writer
+        .write_all(&command(&[b"SET", b"before", b"snapshot"]))
+        .unwrap();
+    read_exact_response(&mut writer, b"+OK\r\n");
+    let primary_port = primary.port.to_string();
+    let replica = common::Server::start_with(&["--replicaof", "127.0.0.1", &primary_port]);
+    wait_for_value(&replica, b"before", b"snapshot");
+    writer
+        .write_all(&command(&[b"SET", b"after", b"streamed"]))
+        .unwrap();
+    read_exact_response(&mut writer, b"+OK\r\n");
+    wait_for_value(&replica, b"after", b"streamed");
+    let mut replica_client = replica.connect().unwrap();
+    replica_client
+        .write_all(&command(&[b"SET", b"forbidden", b"x"]))
+        .unwrap();
+    read_exact_response(
+        &mut replica_client,
+        b"-READONLY You can't write against a read only replica.\r\n",
+    );
+}

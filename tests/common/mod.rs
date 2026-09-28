@@ -10,6 +10,10 @@ pub struct Server {
 
 impl Server {
     pub fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    pub fn start_with(extra_args: &[&str]) -> Self {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -17,6 +21,7 @@ impl Server {
             .port();
         let child = Command::new(env!("CARGO_BIN_EXE_reru"))
             .args(["--port", &port.to_string()])
+            .args(extra_args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
