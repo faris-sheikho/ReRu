@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 
 fn handle_client(mut stream: TcpStream) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
-    if let Some(command) = protocol::read_command(&mut reader)? {
+    while let Some(command) = protocol::read_command(&mut reader)? {
         let response = if command[0].eq_ignore_ascii_case(b"PING") {
             b"+PONG\r\n".to_vec()
         } else {

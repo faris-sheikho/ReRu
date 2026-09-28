@@ -31,3 +31,15 @@ fn responds_to_ping() {
     stream.write_all(&command(&[b"PING"])).unwrap();
     read_exact_response(&mut stream, b"+PONG\r\n");
 }
+
+#[test]
+fn responds_to_multiple_pings_on_one_connection() {
+    let server = common::Server::start();
+    let mut stream = server.connect().unwrap();
+    let mut pipelined = command(&[b"PING"]);
+    pipelined.extend(command(&[b"ping"]));
+    stream.write_all(&pipelined).unwrap();
+    read_exact_response(&mut stream, b"+PONG\r\n+PONG\r\n");
+    stream.write_all(&command(&[b"PING"])).unwrap();
+    read_exact_response(&mut stream, b"+PONG\r\n");
+}
