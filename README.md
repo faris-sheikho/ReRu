@@ -19,14 +19,16 @@ after writes and restores it on startup. Its file format is specific to ReRu.
 
 ## Current support
 
-- RESP2, concurrent clients, in-memory strings, lists, and streams; `EX`/`PX` expiry
+- RESP2, concurrent clients, strings, lists, streams, hashes, and sets; key expiry
 - `PING`, `ECHO`, `SET`, `GET`, `INCR`, `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP`, `TYPE`
 - Initial `XADD`, `XRANGE`, `XREAD`, and `XLEN` support
+- Hash fields: `HSET`, `HGET`, multi-field operations, enumeration, deletion, and `HINCRBY`
+- Set membership, removal, cardinality, `SUNION`, `SINTER`, and `SDIFF`
 - `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, and `PERSIST`
 - `MULTI`, `EXEC`, `DISCARD`, `WATCH`, and `UNWATCH`, including optimistic locking
   on primary and replica connections
 
-28 public command names are supported, with limitations documented in the
+49 public command names are supported, with limitations documented in the
 [compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 

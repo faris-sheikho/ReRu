@@ -2,7 +2,8 @@
 
 ReRu is an incremental Rust implementation of Redis-compatible behavior. The
 first 20 CodeCrafters milestones, initial stream commands, transactions with
-optimistic locking, and initial keyspace commands are implemented. Optional
+optimistic locking, initial keyspace commands, and core hashes and sets are
+implemented. Optional
 ReRu snapshots and ReRu-to-ReRu replication are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
 Redis 8.10.2 is the pinned compatibility reference. The current Rust code uses
@@ -21,8 +22,9 @@ not been selected.
 ## Work remaining
 
 1. Complete lists and streams, including blocking operations and stream IDs.
-2. Add the remaining core data types: hashes, sets, sorted sets, bitmaps,
-   geospatial indexes, and their command families.
+2. Add sorted sets, bitmaps, geospatial indexes, and their command families;
+   extend hashes and sets with scans, field expiry, random access, moves, and
+   storing set algebra results.
 3. Expand transaction compatibility testing, then add pub/sub, scripting, and
    the remaining keyspace commands.
 4. Add Redis-compatible RDB and AOF persistence with restart and recovery tests.

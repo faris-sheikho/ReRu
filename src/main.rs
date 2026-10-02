@@ -1,3 +1,4 @@
+mod collections;
 mod keyspace;
 mod persistence;
 mod protocol;
@@ -16,6 +17,8 @@ enum Value {
     String(Vec<u8>),
     List(Vec<Vec<u8>>),
     Stream(streams::Stream),
+    Hash(HashMap<Vec<u8>, Vec<u8>>),
+    Set(HashSet<Vec<u8>>),
 }
 
 struct Entry {
@@ -120,25 +123,28 @@ fn invalidate_watch(store: &Store, key: &[u8]) {
 type Store = Arc<SharedStore>;
 
 fn is_mutating(command: &[Vec<u8>]) -> bool {
-    [
-        b"SET".as_slice(),
-        b"INCR",
-        b"RPUSH",
-        b"LPUSH",
-        b"LPOP",
-        b"BLPOP",
-        b"XADD",
-        b"DEL",
-        b"EXPIRE",
-        b"PEXPIRE",
-        b"PERSIST",
-    ]
-    .iter()
-    .any(|name| command[0].eq_ignore_ascii_case(name))
+    collections::is_mutating(command)
+        || [
+            b"SET".as_slice(),
+            b"INCR",
+            b"RPUSH",
+            b"LPUSH",
+            b"LPOP",
+            b"BLPOP",
+            b"XADD",
+            b"DEL",
+            b"EXPIRE",
+            b"PEXPIRE",
+            b"PERSIST",
+        ]
+        .iter()
+        .any(|name| command[0].eq_ignore_ascii_case(name))
 }
 
 fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
-    if !is_mutating(command)
+    // Collection handlers record real changes themselves, including no-op checks.
+    if collections::valid_arity(command).is_some()
+        || !is_mutating(command)
         || response.starts_with(b"-")
         || command[0].eq_ignore_ascii_case(b"DEL")
         || command[0].eq_ignore_ascii_case(b"BLPOP")
@@ -460,7 +466,9 @@ fn xread_ids(
 }
 
 fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
-    if let Some(response) = keyspace::execute(command, store) {
+    if let Some(response) = collections::execute(command, store) {
+        response
+    } else if let Some(response) = keyspace::execute(command, store) {
         response
     } else if command[0].eq_ignore_ascii_case(b"UNWATCH") {
         b"+OK\r\n".to_vec()
@@ -732,6 +740,8 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                 Some(Value::String(_)) => b"+string\r\n".to_vec(),
                 Some(Value::List(_)) => b"+list\r\n".to_vec(),
                 Some(Value::Stream(_)) => b"+stream\r\n".to_vec(),
+                Some(Value::Hash(_)) => b"+hash\r\n".to_vec(),
+                Some(Value::Set(_)) => b"+set\r\n".to_vec(),
                 None => b"+none\r\n".to_vec(),
             }
         }
@@ -878,7 +888,9 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
 fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     let name = &command[0];
     let arity = command.len();
-    let valid = if let Some(valid) = keyspace::valid_arity(command) {
+    let valid = if let Some(valid) = collections::valid_arity(command) {
+        valid
+    } else if let Some(valid) = keyspace::valid_arity(command) {
         valid
     } else if name.eq_ignore_ascii_case(b"PING") {
         arity <= 2

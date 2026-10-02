@@ -1,5 +1,5 @@
 use crate::{streams, Entry, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Write};
 use std::path::Path;
@@ -106,6 +106,21 @@ pub fn encode(entries: &HashMap<Vec<u8>, Entry>) -> io::Result<Vec<u8>> {
                     }
                 }
             }
+            Value::Hash(fields) => {
+                output.push(4);
+                put_u64(&mut output, fields.len() as u64);
+                for (field, value) in fields {
+                    put_bytes(&mut output, field)?;
+                    put_bytes(&mut output, value)?;
+                }
+            }
+            Value::Set(members) => {
+                output.push(5);
+                put_u64(&mut output, members.len() as u64);
+                for member in members {
+                    put_bytes(&mut output, member)?;
+                }
+            }
         }
     }
     if output.len() > MAX_SNAPSHOT {
@@ -172,6 +187,34 @@ pub fn decode(bytes: &[u8]) -> io::Result<HashMap<Vec<u8>, Entry>> {
                 }
                 Value::Stream(stream)
             }
+            4 => {
+                let count = usize::try_from(read_u64(&mut cursor)?).map_err(|_| invalid())?;
+                if count == 0 || count > MAX_ITEMS {
+                    return Err(invalid());
+                }
+                let mut fields = HashMap::new();
+                for _ in 0..count {
+                    let field = read_bytes(&mut cursor)?;
+                    let value = read_bytes(&mut cursor)?;
+                    if fields.insert(field, value).is_some() {
+                        return Err(invalid());
+                    }
+                }
+                Value::Hash(fields)
+            }
+            5 => {
+                let count = usize::try_from(read_u64(&mut cursor)?).map_err(|_| invalid())?;
+                if count == 0 || count > MAX_ITEMS {
+                    return Err(invalid());
+                }
+                let mut members = HashSet::new();
+                for _ in 0..count {
+                    if !members.insert(read_bytes(&mut cursor)?) {
+                        return Err(invalid());
+                    }
+                }
+                Value::Set(members)
+            }
             _ => return Err(invalid()),
         };
         let expires_at = if expiry == u64::MAX {
@@ -237,4 +280,45 @@ pub fn save(path: &Path, bytes: &[u8]) -> io::Result<()> {
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collection_snapshot(kind: u8, count: u64, values: &[&[u8]]) -> Vec<u8> {
+        let mut bytes = MAGIC.to_vec();
+        put_u64(&mut bytes, 1);
+        put_bytes(&mut bytes, b"key").unwrap();
+        put_u64(&mut bytes, u64::MAX);
+        bytes.push(kind);
+        put_u64(&mut bytes, count);
+        for value in values {
+            put_bytes(&mut bytes, value).unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn validates_hash_and_set_snapshot_payloads() {
+        let hash = collection_snapshot(4, 1, &[b"f\0", b"v\0"]);
+        let set = collection_snapshot(5, 1, &[b"m\0"]);
+        assert!(
+            matches!(&decode(&hash).unwrap()[b"key".as_slice()].value, Value::Hash(fields) if fields.get(b"f\0".as_slice()).unwrap() == b"v\0")
+        );
+        assert!(
+            matches!(&decode(&set).unwrap()[b"key".as_slice()].value, Value::Set(members) if members.contains(b"m\0".as_slice()))
+        );
+        for bytes in [
+            collection_snapshot(4, 2, &[b"f", b"1", b"f", b"2"]),
+            collection_snapshot(5, 2, &[b"m", b"m"]),
+            collection_snapshot(4, 0, &[]),
+            collection_snapshot(5, 0, &[]),
+            collection_snapshot(5, MAX_ITEMS as u64 + 1, &[]),
+            hash[..hash.len() - 1].to_vec(),
+            set[..set.len() - 1].to_vec(),
+        ] {
+            assert!(decode(&bytes).is_err());
+        }
+    }
 }
