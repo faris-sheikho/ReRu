@@ -1,8 +1,10 @@
+mod keyspace;
 mod persistence;
 mod protocol;
+mod replication;
 mod streams;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -28,6 +30,91 @@ struct SharedStore {
     snapshot_path: Option<PathBuf>,
     replicas: Mutex<Vec<SyncSender<Vec<u8>>>>,
     read_only: bool,
+    watched_keys: Mutex<HashMap<Vec<u8>, WatchRegistration>>,
+    pending_keys: Mutex<HashSet<Vec<u8>>>,
+}
+
+#[derive(Default)]
+struct WatchRegistration {
+    revision: u64,
+    clients: usize,
+}
+
+struct ClientWatches {
+    store: Store,
+    keys: HashMap<Vec<u8>, (u64, Option<Instant>)>,
+}
+
+impl ClientWatches {
+    fn new(store: Store) -> Self {
+        Self {
+            store,
+            keys: HashMap::new(),
+        }
+    }
+
+    // Caller holds command_gate so registration and EXEC observe one command order.
+    fn watch(&mut self, keys: &[Vec<u8>]) {
+        let mut entries = self.store.entries.lock().unwrap();
+        for key in keys {
+            remove_expired(&mut entries, key);
+        }
+        let mut registry = self.store.watched_keys.lock().unwrap();
+        for key in keys {
+            if self.keys.contains_key(key) {
+                continue;
+            }
+            let registration = registry.entry(key.clone()).or_default();
+            registration.clients += 1;
+            self.keys.insert(
+                key.clone(),
+                (
+                    registration.revision,
+                    entries.get(key).and_then(|entry| entry.expires_at),
+                ),
+            );
+        }
+    }
+
+    fn changed(&self) -> bool {
+        let registry = self.store.watched_keys.lock().unwrap();
+        self.keys.iter().any(|(key, (revision, expiry))| {
+            registry
+                .get(key)
+                .is_none_or(|item| item.revision != *revision)
+                || expiry.is_some_and(|deadline| Instant::now() >= deadline)
+        })
+    }
+
+    fn clear(&mut self) {
+        let mut registry = self.store.watched_keys.lock().unwrap();
+        for key in self.keys.keys() {
+            if let Some(registration) = registry.get_mut(key) {
+                registration.clients -= 1;
+                if registration.clients == 0 {
+                    registry.remove(key);
+                }
+            }
+        }
+        self.keys.clear();
+    }
+}
+
+impl Drop for ClientWatches {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+fn mark_modified(store: &Store, key: &[u8]) {
+    store.pending_keys.lock().unwrap().insert(key.to_vec());
+    invalidate_watch(store, key);
+}
+
+fn invalidate_watch(store: &Store, key: &[u8]) {
+    if let Some(registration) = store.watched_keys.lock().unwrap().get_mut(key) {
+        registration.revision = registration.revision.wrapping_add(1);
+    }
 }
 
 type Store = Arc<SharedStore>;
@@ -41,12 +128,43 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
         b"LPOP",
         b"BLPOP",
         b"XADD",
+        b"DEL",
+        b"EXPIRE",
+        b"PEXPIRE",
+        b"PERSIST",
     ]
     .iter()
     .any(|name| command[0].eq_ignore_ascii_case(name))
 }
 
+fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
+    if !is_mutating(command)
+        || response.starts_with(b"-")
+        || command[0].eq_ignore_ascii_case(b"DEL")
+        || command[0].eq_ignore_ascii_case(b"BLPOP")
+    {
+        return;
+    }
+    if command[0].eq_ignore_ascii_case(b"LPOP")
+        && [b"$-1\r\n".as_slice(), b"*-1\r\n", b"*0\r\n"].contains(&response)
+    {
+        return;
+    }
+    if [b"EXPIRE".as_slice(), b"PEXPIRE", b"PERSIST"]
+        .iter()
+        .any(|name| command[0].eq_ignore_ascii_case(name))
+        && response != b":1\r\n"
+    {
+        return;
+    }
+    mark_modified(store, &command[1]);
+}
+
 fn save_and_publish(store: &Store) -> io::Result<()> {
+    let changed_keys: Vec<_> = store.pending_keys.lock().unwrap().drain().collect();
+    if changed_keys.is_empty() {
+        return Ok(());
+    }
     if store.snapshot_path.is_none() && store.replicas.lock().unwrap().is_empty() {
         return Ok(());
     }
@@ -54,11 +172,12 @@ fn save_and_publish(store: &Store) -> io::Result<()> {
     if let Some(path) = &store.snapshot_path {
         persistence::save(path, &bytes)?;
     }
+    let update = replication::encode(&bytes, Some(&changed_keys))?;
     store
         .replicas
         .lock()
         .unwrap()
-        .retain(|sender| sender.try_send(bytes.clone()).is_ok());
+        .retain(|sender| sender.try_send(update.clone()).is_ok());
     Ok(())
 }
 
@@ -71,7 +190,8 @@ fn serve_replica(mut stream: TcpStream, store: &Store) -> io::Result<()> {
     let (sender, receiver) = mpsc::sync_channel(8);
     let initial = {
         let _gate = store.command_gate.lock().unwrap();
-        let bytes = persistence::encode(&store.entries.lock().unwrap())?;
+        let snapshot = persistence::encode(&store.entries.lock().unwrap())?;
+        let bytes = replication::encode(&snapshot, None)?;
         store.replicas.lock().unwrap().push(sender);
         bytes
     };
@@ -92,7 +212,7 @@ fn follow_primary(address: String, store: Store) {
                 let mut length = [0; 8];
                 stream.read_exact(&mut length)?;
                 let size = u64::from_be_bytes(length);
-                if size > 256 * 1024 * 1024 {
+                if size > replication::MAX_FRAME as u64 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "replica snapshot too large",
@@ -100,10 +220,20 @@ fn follow_primary(address: String, store: Store) {
                 }
                 let mut bytes = vec![0; size as usize];
                 stream.read_exact(&mut bytes)?;
-                let entries = persistence::decode(&bytes)?;
+                let update = replication::decode(&bytes)?;
+                let entries = persistence::decode(update.snapshot)?;
                 let _gate = store.command_gate.lock().unwrap();
                 if let Some(path) = &store.snapshot_path {
-                    persistence::save(path, &bytes)?;
+                    persistence::save(path, update.snapshot)?;
+                }
+                if update.full_sync {
+                    for item in store.watched_keys.lock().unwrap().values_mut() {
+                        item.revision = item.revision.wrapping_add(1);
+                    }
+                } else {
+                    for key in &update.changed_keys {
+                        invalidate_watch(&store, key);
+                    }
                 }
                 *store.entries.lock().unwrap() = entries;
                 store.changed.notify_all();
@@ -173,7 +303,11 @@ fn list_range(items: &[Vec<u8>], start: i64, stop: i64) -> Vec<u8> {
     }
 }
 
-fn try_blpop(entries: &mut HashMap<Vec<u8>, Entry>, keys: &[Vec<u8>]) -> Option<Vec<u8>> {
+fn try_blpop(
+    entries: &mut HashMap<Vec<u8>, Entry>,
+    keys: &[Vec<u8>],
+    store: &Store,
+) -> Option<Vec<u8>> {
     for key in keys {
         remove_expired(entries, key);
         match entries.get_mut(key) {
@@ -185,6 +319,7 @@ fn try_blpop(entries: &mut HashMap<Vec<u8>, Entry>, keys: &[Vec<u8>]) -> Option<
                 if items.is_empty() {
                     entries.remove(key);
                 }
+                mark_modified(store, key);
                 return Some(protocol::array(&[key.clone(), value]));
             }
             Some(_) => {
@@ -325,8 +460,16 @@ fn xread_ids(
 }
 
 fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
-    if command[0].eq_ignore_ascii_case(b"PING") {
-        b"+PONG\r\n".to_vec()
+    if let Some(response) = keyspace::execute(command, store) {
+        response
+    } else if command[0].eq_ignore_ascii_case(b"UNWATCH") {
+        b"+OK\r\n".to_vec()
+    } else if command[0].eq_ignore_ascii_case(b"PING") {
+        match command.len() {
+            1 => b"+PONG\r\n".to_vec(),
+            2 => protocol::bulk(&command[1]),
+            _ => protocol::error("wrong number of arguments for 'ping' command"),
+        }
     } else if command[0].eq_ignore_ascii_case(b"ECHO") {
         if command.len() != 2 {
             protocol::error("wrong number of arguments for 'echo' command")
@@ -525,7 +668,7 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                     match store.get_mut(&command[1]) {
                             Some(Entry { value: Value::List(items), .. }) => {
                                 if count == 0 {
-                                    b"*-1\r\n".to_vec()
+                                    b"*0\r\n".to_vec()
                                 } else {
                                     let values: Vec<_> = items.drain(..count.min(items.len())).collect();
                                     let empty = items.is_empty();
@@ -540,6 +683,7 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                                 }
                             }
                             Some(_) => b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec(),
+                            None if command.len() == 3 => b"*-1\r\n".to_vec(),
                             None => b"$-1\r\n".to_vec(),
                         }
                 }
@@ -556,7 +700,7 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                     loop {
                         let gate = allow_blocking.then(|| store.command_gate.lock().unwrap());
                         let mut entries = store.entries.lock().unwrap();
-                        if let Some(response) = try_blpop(&mut entries, keys) {
+                        if let Some(response) = try_blpop(&mut entries, keys, store) {
                             break response;
                         }
                         if !allow_blocking {
@@ -734,8 +878,12 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
 fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     let name = &command[0];
     let arity = command.len();
-    let valid = if name.eq_ignore_ascii_case(b"PING") {
+    let valid = if let Some(valid) = keyspace::valid_arity(command) {
+        valid
+    } else if name.eq_ignore_ascii_case(b"PING") {
         arity <= 2
+    } else if name.eq_ignore_ascii_case(b"UNWATCH") {
+        arity == 1
     } else if name.eq_ignore_ascii_case(b"ECHO")
         || name.eq_ignore_ascii_case(b"GET")
         || name.eq_ignore_ascii_case(b"INCR")
@@ -778,6 +926,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut transaction: Option<Vec<Vec<Vec<u8>>>> = None;
     let mut transaction_error = false;
+    let mut watches = ClientWatches::new(Arc::clone(&store));
     while let Some(command) = protocol::read_command(&mut reader)? {
         if command[0].eq_ignore_ascii_case(b"REPLSYNC") && !store.read_only {
             if command.len() != 1 {
@@ -793,6 +942,23 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 transaction_error = true;
             }
             b"-READONLY You can't write against a read only replica.\r\n".to_vec()
+        } else if command[0].eq_ignore_ascii_case(b"WATCH") {
+            if command.len() < 2 {
+                protocol::error("wrong number of arguments for 'watch' command")
+            } else if transaction.is_some() {
+                protocol::error("WATCH inside MULTI is not allowed")
+            } else {
+                let _gate = store.command_gate.lock().unwrap();
+                watches.watch(&command[1..]);
+                b"+OK\r\n".to_vec()
+            }
+        } else if command[0].eq_ignore_ascii_case(b"UNWATCH") && transaction.is_none() {
+            if command.len() != 1 {
+                protocol::error("wrong number of arguments for 'unwatch' command")
+            } else {
+                watches.clear();
+                b"+OK\r\n".to_vec()
+            }
         } else if command[0].eq_ignore_ascii_case(b"MULTI") {
             if command.len() != 1 {
                 protocol::error("wrong number of arguments for 'multi' command")
@@ -808,6 +974,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 protocol::error("wrong number of arguments for 'discard' command")
             } else if transaction.take().is_some() {
                 transaction_error = false;
+                watches.clear();
                 b"+OK\r\n".to_vec()
             } else {
                 protocol::error("DISCARD without MULTI")
@@ -818,18 +985,27 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             } else if let Some(queued) = transaction.take() {
                 if transaction_error {
                     transaction_error = false;
+                    watches.clear();
                     b"-EXECABORT Transaction discarded because of previous errors.\r\n".to_vec()
                 } else {
                     let _gate = store.command_gate.lock().unwrap();
-                    let mut response = format!("*{}\r\n", queued.len()).into_bytes();
-                    let writes = queued.iter().any(|command| is_mutating(command));
-                    for queued_command in queued {
-                        response.extend(execute_command(&queued_command, &store, false));
+                    let changed = watches.changed();
+                    watches.clear();
+                    if changed {
+                        b"*-1\r\n".to_vec()
+                    } else {
+                        let mut response = format!("*{}\r\n", queued.len()).into_bytes();
+                        let writes = queued.iter().any(|command| is_mutating(command));
+                        for queued_command in queued {
+                            let result = execute_command(&queued_command, &store, false);
+                            record_write(&store, &queued_command, &result);
+                            response.extend(result);
+                        }
+                        if writes {
+                            save_and_publish(&store)?;
+                        }
+                        response
                     }
-                    if writes {
-                        save_and_publish(&store)?;
-                    }
-                    response
                 }
             } else {
                 protocol::error("EXEC without MULTI")
@@ -849,6 +1025,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             || command[0].eq_ignore_ascii_case(b"XREAD")
         {
             let response = execute_command(&command, &store, true);
+            record_write(&store, &command, &response);
             if is_mutating(&command) {
                 let _gate = store.command_gate.lock().unwrap();
                 save_and_publish(&store)?;
@@ -857,6 +1034,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
         } else {
             let _gate = store.command_gate.lock().unwrap();
             let response = execute_command(&command, &store, true);
+            record_write(&store, &command, &response);
             if is_mutating(&command) {
                 save_and_publish(&store)?;
             }
@@ -923,6 +1101,8 @@ fn main() -> io::Result<()> {
         snapshot_path,
         replicas: Mutex::new(Vec::new()),
         read_only: replica_of.is_some(),
+        watched_keys: Mutex::new(HashMap::new()),
+        pending_keys: Mutex::new(HashSet::new()),
     });
     if let Some(address) = replica_of {
         let replica_store = Arc::clone(&store);

@@ -78,6 +78,7 @@ pub fn read_command<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<Vec<u8>
 }
 
 pub fn error(message: &str) -> Vec<u8> {
+    let message = message.replace(['\r', '\n'], " ");
     format!("-ERR {message}\r\n").into_bytes()
 }
 

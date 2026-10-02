@@ -303,7 +303,7 @@ fn lpop_count_returns_multiple_items() {
     stream
         .write_all(&command(&[b"LPOP", b"items", b"0"]))
         .unwrap();
-    read_exact_response(&mut stream, b"*-1\r\n");
+    read_exact_response(&mut stream, b"*0\r\n");
     stream
         .write_all(&command(&[b"LPOP", b"items", b"9"]))
         .unwrap();

@@ -1,8 +1,10 @@
 # ReRu roadmap
 
 ReRu is an incremental Rust implementation of Redis-compatible behavior. The
-first 20 CodeCrafters milestones, initial stream commands, and basic transactions
-are implemented. Optional ReRu snapshots and ReRu-to-ReRu replication are tested.
+first 20 CodeCrafters milestones, initial stream commands, transactions with
+optimistic locking, and initial keyspace commands are implemented. Optional
+ReRu snapshots and ReRu-to-ReRu replication are tested. See the
+[compatibility status](COMPATIBILITY.md) for the current command inventory.
 Redis 8.10.2 is the pinned compatibility reference. The current Rust code uses
 upstream documentation for behavior; a direct source-translation license has
 not been selected.
@@ -21,8 +23,8 @@ not been selected.
 1. Complete lists and streams, including blocking operations and stream IDs.
 2. Add the remaining core data types: hashes, sets, sorted sets, bitmaps,
    geospatial indexes, and their command families.
-3. Complete transactions with `WATCH`, then add pub/sub, scripting, and keyspace
-   commands.
+3. Expand transaction compatibility testing, then add pub/sub, scripting, and
+   the remaining keyspace commands.
 4. Add Redis-compatible RDB and AOF persistence with restart and recovery tests.
 5. Add Redis PSYNC replication, failover, clustering, authentication, and
    configuration.
@@ -35,6 +37,8 @@ not been selected.
   write using a ReRu-specific format; it is not Redis RDB or AOF.
 - Replicas use full snapshot transfer on each write and resynchronize after a
   disconnect. They do not support Redis PSYNC, offsets, or backlog recovery.
+  Custom replication frames carry changed-key metadata for replica `WATCH`;
+  a full resynchronization invalidates every active watch on that replica.
 - Only RESP array requests and RESP2 replies are supported.
 - Each client uses one operating-system thread. There is no configured client
   or memory limit.

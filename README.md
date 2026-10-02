@@ -22,7 +22,14 @@ after writes and restores it on startup. Its file format is specific to ReRu.
 - RESP2, concurrent clients, in-memory strings, lists, and streams; `EX`/`PX` expiry
 - `PING`, `ECHO`, `SET`, `GET`, `INCR`, `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP`, `TYPE`
 - Initial `XADD`, `XRANGE`, `XREAD`, and `XLEN` support
-- `MULTI`, `EXEC`, and `DISCARD`, including queued commands and runtime errors
+- `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, and `PERSIST`
+- `MULTI`, `EXEC`, `DISCARD`, `WATCH`, and `UNWATCH`, including optimistic locking
+  on primary and replica connections
 
-Redis RDB/AOF files, PSYNC replication, `WATCH`, clustering, authentication,
-and many commands remain. See the [roadmap](docs/ROADMAP.md).
+28 public command names are supported, with limitations documented in the
+[compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
+`RERUREP1` framing protocol; primary and replicas must run matching builds.
+
+Redis RDB/AOF files, PSYNC replication, clustering, authentication,
+and many commands remain. See the [roadmap](docs/ROADMAP.md) and
+[team implementation plan](docs/ReRu_Implementation_Plan.pdf).

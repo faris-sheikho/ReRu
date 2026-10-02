@@ -1,0 +1,174 @@
+use crate::{mark_modified, protocol, remove_expired, Store};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
+    let name = &command[0];
+    if name.eq_ignore_ascii_case(b"DEL") || name.eq_ignore_ascii_case(b"EXISTS") {
+        Some(command.len() >= 2)
+    } else if [b"TTL".as_slice(), b"PTTL", b"PERSIST"]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    {
+        Some(command.len() == 2)
+    } else if name.eq_ignore_ascii_case(b"EXPIRE") || name.eq_ignore_ascii_case(b"PEXPIRE") {
+        Some(command.len() >= 3)
+    } else {
+        None
+    }
+}
+
+#[derive(Default)]
+struct ExpiryConditions {
+    absent: bool,
+    present: bool,
+    longer: bool,
+    shorter: bool,
+}
+
+fn expiry_arguments(command: &[Vec<u8>]) -> Result<(i64, ExpiryConditions), Vec<u8>> {
+    let mut conditions = ExpiryConditions::default();
+    for option in &command[3..] {
+        if option.eq_ignore_ascii_case(b"NX") {
+            conditions.absent = true;
+        } else if option.eq_ignore_ascii_case(b"XX") {
+            conditions.present = true;
+        } else if option.eq_ignore_ascii_case(b"GT") {
+            conditions.longer = true;
+        } else if option.eq_ignore_ascii_case(b"LT") {
+            conditions.shorter = true;
+        } else {
+            return Err(protocol::error(&format!(
+                "Unsupported option {}",
+                String::from_utf8_lossy(option)
+            )));
+        }
+    }
+    if conditions.absent && (conditions.present || conditions.longer || conditions.shorter) {
+        return Err(protocol::error(
+            "NX and XX, GT or LT options at the same time are not compatible",
+        ));
+    }
+    if conditions.longer && conditions.shorter {
+        return Err(protocol::error(
+            "GT and LT options at the same time are not compatible",
+        ));
+    }
+    let raw = &command[2];
+    let number = std::str::from_utf8(raw)
+        .ok()
+        .and_then(|text| text.parse::<i64>().ok())
+        .filter(|number| number.to_string().as_bytes() == raw)
+        .ok_or_else(|| protocol::error("value is not an integer or out of range"))?;
+    let invalid_expiry = || {
+        protocol::error(&format!(
+            "invalid expire time in '{}' command",
+            String::from_utf8_lossy(&command[0]).to_ascii_lowercase()
+        ))
+    };
+    let milliseconds = if command[0].eq_ignore_ascii_case(b"EXPIRE") {
+        number.checked_mul(1000).ok_or_else(invalid_expiry)?
+    } else {
+        number
+    };
+    let epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .ok_or_else(invalid_expiry)?;
+    epoch_ms
+        .checked_add(milliseconds)
+        .ok_or_else(invalid_expiry)?;
+    Ok((milliseconds, conditions))
+}
+
+pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
+    let valid = valid_arity(command)?;
+    let name = &command[0];
+    if !valid {
+        return Some(protocol::error(&format!(
+            "wrong number of arguments for '{}' command",
+            String::from_utf8_lossy(name).to_ascii_lowercase()
+        )));
+    }
+    if name.eq_ignore_ascii_case(b"DEL") || name.eq_ignore_ascii_case(b"EXISTS") {
+        let mut entries = store.entries.lock().unwrap();
+        let mut count = 0;
+        for key in &command[1..] {
+            remove_expired(&mut entries, key);
+            if name.eq_ignore_ascii_case(b"DEL") {
+                if entries.remove(key).is_some() {
+                    mark_modified(store, key);
+                    count += 1;
+                }
+            } else if entries.contains_key(key) {
+                count += 1;
+            }
+        }
+        return Some(format!(":{count}\r\n").into_bytes());
+    }
+    if name.eq_ignore_ascii_case(b"TTL") || name.eq_ignore_ascii_case(b"PTTL") {
+        let mut entries = store.entries.lock().unwrap();
+        remove_expired(&mut entries, &command[1]);
+        let value = match entries.get(&command[1]) {
+            None => -2,
+            Some(entry) => match entry.expires_at {
+                None => -1,
+                Some(deadline) => {
+                    let milliseconds = deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis();
+                    if name.eq_ignore_ascii_case(b"PTTL") {
+                        milliseconds as i64
+                    } else {
+                        ((milliseconds + 500) / 1000) as i64
+                    }
+                }
+            },
+        };
+        return Some(format!(":{value}\r\n").into_bytes());
+    }
+    if name.eq_ignore_ascii_case(b"PERSIST") {
+        let mut entries = store.entries.lock().unwrap();
+        remove_expired(&mut entries, &command[1]);
+        let changed = entries
+            .get_mut(&command[1])
+            .is_some_and(|entry| entry.expires_at.take().is_some());
+        return Some(if changed {
+            b":1\r\n".to_vec()
+        } else {
+            b":0\r\n".to_vec()
+        });
+    }
+    let (milliseconds, conditions) = match expiry_arguments(command) {
+        Ok(arguments) => arguments,
+        Err(error) => return Some(error),
+    };
+    let now = Instant::now();
+    let deadline = if milliseconds <= 0 {
+        now
+    } else {
+        match now.checked_add(Duration::from_millis(milliseconds as u64)) {
+            Some(deadline) => deadline,
+            None => return Some(protocol::error("invalid expire time")),
+        }
+    };
+    let mut entries = store.entries.lock().unwrap();
+    remove_expired(&mut entries, &command[1]);
+    let Some(entry) = entries.get_mut(&command[1]) else {
+        return Some(b":0\r\n".to_vec());
+    };
+    let old = entry.expires_at;
+    let skipped = (conditions.absent && old.is_some())
+        || (conditions.present && old.is_none())
+        || (conditions.longer && old.is_none_or(|previous| deadline <= previous))
+        || (conditions.shorter && old.is_some_and(|previous| deadline >= previous));
+    if skipped {
+        return Some(b":0\r\n".to_vec());
+    }
+    if milliseconds <= 0 {
+        entries.remove(&command[1]);
+    } else {
+        entry.expires_at = Some(deadline);
+    }
+    Some(b":1\r\n".to_vec())
+}
