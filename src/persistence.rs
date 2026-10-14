@@ -121,6 +121,14 @@ pub fn encode(entries: &HashMap<Vec<u8>, Entry>) -> io::Result<Vec<u8>> {
                     put_bytes(&mut output, member)?;
                 }
             }
+            Value::SortedSet(members) => {
+                output.push(6);
+                put_u64(&mut output, members.len() as u64);
+                for (member, score) in members.entries() {
+                    put_bytes(&mut output, member)?;
+                    put_u64(&mut output, score.to_bits());
+                }
+            }
         }
     }
     if output.len() > MAX_SNAPSHOT {
@@ -214,6 +222,21 @@ pub fn decode(bytes: &[u8]) -> io::Result<HashMap<Vec<u8>, Entry>> {
                     }
                 }
                 Value::Set(members)
+            }
+            6 => {
+                let count = usize::try_from(read_u64(&mut cursor)?).map_err(|_| invalid())?;
+                if count == 0 || count > MAX_ITEMS {
+                    return Err(invalid());
+                }
+                let mut members = crate::sorted_sets::SortedSet::default();
+                for _ in 0..count {
+                    let member = read_bytes(&mut cursor)?;
+                    let score = f64::from_bits(read_u64(&mut cursor)?);
+                    if score.is_nan() || members.insert(member, score).is_some() {
+                        return Err(invalid());
+                    }
+                }
+                Value::SortedSet(members)
             }
             _ => return Err(invalid()),
         };
@@ -320,5 +343,41 @@ mod tests {
         ] {
             assert!(decode(&bytes).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_invalid_sorted_set_snapshot_scores_and_duplicates() {
+        let mut entries = HashMap::new();
+        let mut set = crate::sorted_sets::SortedSet::default();
+        set.insert(b"one".to_vec(), 1.5);
+        set.insert(b"two".to_vec(), f64::INFINITY);
+        entries.insert(
+            b"scores".to_vec(),
+            Entry {
+                value: Value::SortedSet(set),
+                expires_at: None,
+            },
+        );
+        let valid = encode(&entries).unwrap();
+        let decoded = decode(&valid).unwrap();
+        let Value::SortedSet(restored) = &decoded[b"scores".as_slice()].value else {
+            panic!("expected zset")
+        };
+        assert_eq!(restored.get(b"one"), Some(1.5));
+        assert_eq!(restored.get(b"two"), Some(f64::INFINITY));
+
+        let mut invalid = valid.clone();
+        let score_offset = valid.len() - 8;
+        invalid[score_offset..].copy_from_slice(&f64::NAN.to_bits().to_be_bytes());
+        assert!(decode(&invalid).is_err());
+
+        let mut duplicate = valid.clone();
+        // Replace the second member's three bytes with the first member's bytes.
+        let position = duplicate
+            .windows(3)
+            .position(|window| window == b"two")
+            .unwrap();
+        duplicate[position..position + 3].copy_from_slice(b"one");
+        assert!(decode(&duplicate).is_err());
     }
 }

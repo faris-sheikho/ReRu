@@ -1,6 +1,6 @@
 # ReRu compatibility status
 
-Updated: 2 October 2026. This inventory describes the implementation and local
+Updated: 14 October 2026. This inventory describes the implementation and local
 tests; it does not certify complete compatibility with Redis.
 
 ## Implemented commands
@@ -8,15 +8,17 @@ tests; it does not certify complete compatibility with Redis.
 | Area | Commands | Current scope |
 | --- | --- | --- |
 | Connection | `PING`, `ECHO` | PING with an optional message; RESP2 requests/replies |
-| Strings | `SET`, `GET`, `INCR` | Binary values, SET EX/PX expiry, integer increment |
+| Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access |
 | Lists | `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP` | Multiple elements, negative range indexes, blocking pop with timeout |
 | Streams | `XADD`, `XRANGE`, `XREAD`, `XLEN` | Entry IDs, ranges and blocking reads; no consumer groups |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HINCRBY` | Binary fields/values, multiple field updates, missing-field nil replies, signed 64-bit increments |
 | Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SUNION`, `SINTER`, `SDIFF` | Binary members, deduplication, membership, cardinality and read-only set algebra |
+| Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZCOUNT`, `ZREM` | Score-ordered members, rank/index ranges, ZADD NX/XX/GT/LT/CH/INCR |
+| Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT |
 | Keyspace | `TYPE`, `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Multiple deletion/existence keys; expiry across current data types; NX/XX/GT/LT expiry conditions |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
 
-Total: **49 public command names**. Supporting a command name does not mean that
+Total: **71 public command names**. Supporting a command name does not mean that
 every Redis option for that command is implemented.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
@@ -31,13 +33,21 @@ HSET/HMSET writes invalidate watches even when values are unchanged. Hash/set
 enumeration is sorted in ReRu for stable output; clients should treat ordering
 as unspecified. HMSET is supported for older clients; prefer HSET for new code.
 
+Sorted sets keep a member lookup map and a score-ordered index. Score changes
+update both indexes. Rank lookup is still linear in the number of members;
+range scans advance through the ordered index. `ZRANGE` supports rank indexes,
+`REV`, and `WITHSCORES`; `BYSCORE`, `BYLEX`, `LIMIT`, and newer sorted-set
+commands remain. Bitmap growth is capped at 64 MiB per value, below Redis's
+maximum; this is an explicit ReRu resource limit. `BITFIELD` is not available.
+Strings and bitmaps share the same underlying value type.
+
 ## Persistence and replication
 
-- Optional `--snapshot FILE` saves strings, lists, streams, hashes, sets and absolute expiry
+- Optional `--snapshot FILE` saves strings, lists, streams, hashes, sets, sorted sets and absolute expiry
   deadlines and restores them at startup. EXPIRE, PERSIST and DEL changes are
   included. This is the custom `RERUSNP1` format, not Redis RDB or AOF.
   New builds can load earlier snapshots. Older builds cannot load snapshots
-  containing hash or set values; use matching builds for these new types.
+  containing newer value types; use matching builds for these types.
 - Optional `--replicaof HOST PORT` provides read-only ReRu replicas, initial
   synchronization, subsequent full dataset snapshots and reconnection.
 - Replication uses custom `RERUREP1` frames with changed-key metadata. Use matching
@@ -48,22 +58,21 @@ as unspecified. HMSET is supported for older clients; prefer HSET for new code.
 
 ## Verification for this increment
 
-The local suite has **61 tests**: 4 unit tests and 57 server integration tests.
-Hash/set tests cover binary fields/members, duplicate inputs, nil replies,
-wrong types, arity, integer overflow, expiry preservation, set algebra,
-no-op and real WATCH conflicts, MULTI/EXEC, concurrent increments, replica
-updates, read-only replicas, snapshot restart and malformed snapshot payloads.
-Earlier keyspace, list, stream and transaction regression tests remain.
-Formatting and Clippy are checked.
+The local suite has **80 tests**: 6 unit tests and 74 server integration tests.
+It covers binary values, wrong types, score ordering and updates, bitmap ranges,
+SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
+restart, replica updates, and malformed snapshot payloads. Earlier keyspace,
+list, stream, hash, set, and transaction regression tests remain. Formatting
+and Clippy are checked.
 
 These are ReRu regression tests. A differential suite against a running pinned
 Redis server is still required before making a compatibility claim.
 
 ## Remaining major work
 
-Sorted sets, bitmaps, geospatial commands, stream consumer groups,
+Additional sorted-set and bitmap commands, geospatial commands, stream consumer groups,
 pub/sub, scripting, broader command options, Redis RDB/AOF, PSYNC, authentication,
-ACLs, RESP3, cluster/failover, bounded resource usage and performance engineering
+ACLs, RESP3, cluster/failover, maxmemory/LRU eviction, bounded resource usage and performance engineering
 remain. Blocking clients do not yet receive Redis's FIFO waiter guarantees.
 Hash field expiry, HSCAN, HINCRBYFLOAT, set scans/random selection, SMOVE,
 and set algebra STORE variants are also pending.

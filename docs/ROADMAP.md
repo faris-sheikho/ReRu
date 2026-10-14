@@ -2,7 +2,8 @@
 
 ReRu is an incremental Rust implementation of Redis-compatible behavior. The
 first 20 CodeCrafters milestones, initial stream commands, transactions with
-optimistic locking, initial keyspace commands, and core hashes and sets are
+optimistic locking, initial keyspace commands, core hashes and sets, initial
+sorted sets and bitmaps, and common cache-oriented string commands are
 implemented. Optional
 ReRu snapshots and ReRu-to-ReRu replication are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
@@ -22,15 +23,15 @@ not been selected.
 ## Work remaining
 
 1. Complete lists and streams, including blocking operations and stream IDs.
-2. Add sorted sets, bitmaps, geospatial indexes, and their command families;
-   extend hashes and sets with scans, field expiry, random access, moves, and
-   storing set algebra results.
+2. Expand sorted sets and bitmaps, add geospatial indexes; extend hashes and
+   sets with scans, field expiry, random access, moves, and storing set algebra
+   results.
 3. Expand transaction compatibility testing, then add pub/sub, scripting, and
    the remaining keyspace commands.
 4. Add Redis-compatible RDB and AOF persistence with restart and recovery tests.
 5. Add Redis PSYNC replication, failover, clustering, authentication, and
    configuration.
-6. Add RESP3, performance and resource controls, operational tooling, and
+6. Add maxmemory eviction, RESP3, performance and resource controls, operational tooling, and
    compatibility testing at scale.
 
 ## Current limits
@@ -43,7 +44,8 @@ not been selected.
   a full resynchronization invalidates every active watch on that replica.
 - Only RESP array requests and RESP2 replies are supported.
 - Each client uses one operating-system thread. There is no configured client
-  or memory limit.
+  or memory limit. Bitmap values have a 64 MiB growth cap.
+- Redis cache eviction policies such as LRU/LFU are not implemented.
 - Blocking list operations wake waiting clients, but Redis's FIFO waiter
   ordering is not implemented yet.
 - This project is not a production Redis replacement at this stage.

@@ -1,8 +1,11 @@
+mod bitmaps;
+mod cache;
 mod collections;
 mod keyspace;
 mod persistence;
 mod protocol;
 mod replication;
+mod sorted_sets;
 mod streams;
 
 use std::collections::{HashMap, HashSet};
@@ -19,6 +22,7 @@ enum Value {
     Stream(streams::Stream),
     Hash(HashMap<Vec<u8>, Vec<u8>>),
     Set(HashSet<Vec<u8>>),
+    SortedSet(sorted_sets::SortedSet),
 }
 
 struct Entry {
@@ -123,7 +127,10 @@ fn invalidate_watch(store: &Store, key: &[u8]) {
 type Store = Arc<SharedStore>;
 
 fn is_mutating(command: &[Vec<u8>]) -> bool {
-    collections::is_mutating(command)
+    cache::is_mutating(command)
+        || bitmaps::is_mutating(command)
+        || sorted_sets::is_mutating(command)
+        || collections::is_mutating(command)
         || [
             b"SET".as_slice(),
             b"INCR",
@@ -143,7 +150,10 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
 
 fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
     // Collection handlers record real changes themselves, including no-op checks.
-    if collections::valid_arity(command).is_some()
+    if cache::valid_arity(command).is_some()
+        || bitmaps::valid_arity(command).is_some()
+        || sorted_sets::valid_arity(command).is_some()
+        || collections::valid_arity(command).is_some()
         || !is_mutating(command)
         || response.starts_with(b"-")
         || command[0].eq_ignore_ascii_case(b"DEL")
@@ -260,32 +270,6 @@ fn remove_expired(store: &mut HashMap<Vec<u8>, Entry>, key: &[u8]) {
     }) {
         store.remove(key);
     }
-}
-
-fn set_expiry(command: &[Vec<u8>]) -> Result<Option<Instant>, Vec<u8>> {
-    if command.len() == 3 {
-        return Ok(None);
-    }
-    if command.len() != 5 {
-        return Err(protocol::error("syntax error"));
-    }
-    let multiplier = if command[3].eq_ignore_ascii_case(b"PX") {
-        1
-    } else if command[3].eq_ignore_ascii_case(b"EX") {
-        1000
-    } else {
-        return Err(protocol::error("syntax error"));
-    };
-    let amount = std::str::from_utf8(&command[4])
-        .ok()
-        .and_then(|text| text.parse::<u64>().ok())
-        .filter(|amount| *amount > 0)
-        .and_then(|amount| amount.checked_mul(multiplier))
-        .ok_or_else(|| protocol::error("invalid expire time in 'set' command"))?;
-    let expires_at = Instant::now()
-        .checked_add(Duration::from_millis(amount))
-        .ok_or_else(|| protocol::error("invalid expire time in 'set' command"))?;
-    Ok(Some(expires_at))
 }
 
 fn list_range(items: &[Vec<u8>], start: i64, stop: i64) -> Vec<u8> {
@@ -466,7 +450,13 @@ fn xread_ids(
 }
 
 fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
-    if let Some(response) = collections::execute(command, store) {
+    if let Some(response) = cache::execute(command, store) {
+        response
+    } else if let Some(response) = bitmaps::execute(command, store) {
+        response
+    } else if let Some(response) = sorted_sets::execute(command, store) {
+        response
+    } else if let Some(response) = collections::execute(command, store) {
         response
     } else if let Some(response) = keyspace::execute(command, store) {
         response
@@ -483,24 +473,6 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
             protocol::error("wrong number of arguments for 'echo' command")
         } else {
             protocol::bulk(&command[1])
-        }
-    } else if command[0].eq_ignore_ascii_case(b"SET") {
-        if command.len() < 3 {
-            protocol::error("wrong number of arguments for 'set' command")
-        } else {
-            match set_expiry(command) {
-                Ok(expires_at) => {
-                    store.entries.lock().unwrap().insert(
-                        command[1].clone(),
-                        Entry {
-                            value: Value::String(command[2].clone()),
-                            expires_at,
-                        },
-                    );
-                    b"+OK\r\n".to_vec()
-                }
-                Err(error) => error,
-            }
         }
     } else if command[0].eq_ignore_ascii_case(b"GET") {
         if command.len() != 2 {
@@ -742,6 +714,7 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                 Some(Value::Stream(_)) => b"+stream\r\n".to_vec(),
                 Some(Value::Hash(_)) => b"+hash\r\n".to_vec(),
                 Some(Value::Set(_)) => b"+set\r\n".to_vec(),
+                Some(Value::SortedSet(_)) => b"+zset\r\n".to_vec(),
                 None => b"+none\r\n".to_vec(),
             }
         }
@@ -888,7 +861,13 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
 fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     let name = &command[0];
     let arity = command.len();
-    let valid = if let Some(valid) = collections::valid_arity(command) {
+    let valid = if let Some(valid) = cache::valid_arity(command) {
+        valid
+    } else if let Some(valid) = bitmaps::valid_arity(command) {
+        valid
+    } else if let Some(valid) = sorted_sets::valid_arity(command) {
+        valid
+    } else if let Some(valid) = collections::valid_arity(command) {
         valid
     } else if let Some(valid) = keyspace::valid_arity(command) {
         valid
@@ -904,8 +883,6 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
         || name.eq_ignore_ascii_case(b"XLEN")
     {
         arity == 2
-    } else if name.eq_ignore_ascii_case(b"SET") {
-        arity == 3 || arity == 5
     } else if name.eq_ignore_ascii_case(b"RPUSH")
         || name.eq_ignore_ascii_case(b"LPUSH")
         || name.eq_ignore_ascii_case(b"BLPOP")

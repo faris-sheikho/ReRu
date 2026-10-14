@@ -19,19 +19,23 @@ after writes and restores it on startup. Its file format is specific to ReRu.
 
 ## Current support
 
-- RESP2, concurrent clients, strings, lists, streams, hashes, and sets; key expiry
+- RESP2, concurrent clients, strings, lists, streams, hashes, sets, and sorted sets; key expiry
 - `PING`, `ECHO`, `SET`, `GET`, `INCR`, `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP`, `TYPE`
+- Cache-oriented string operations: conditional/expiring `SET`, `GETEX`, `GETDEL`,
+  `MGET`, `MSET`, `MSETNX`, `APPEND`, and `STRLEN`
 - Initial `XADD`, `XRANGE`, `XREAD`, and `XLEN` support
 - Hash fields: `HSET`, `HGET`, multi-field operations, enumeration, deletion, and `HINCRBY`
 - Set membership, removal, cardinality, `SUNION`, `SINTER`, and `SDIFF`
+- Sorted-set insertion, score/rank lookup, ranges, counts, and removal
+- Bitmap operations on strings: `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, and `BITPOS`
 - `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, and `PERSIST`
 - `MULTI`, `EXEC`, `DISCARD`, `WATCH`, and `UNWATCH`, including optimistic locking
   on primary and replica connections
 
-49 public command names are supported, with limitations documented in the
+71 public command names are supported, with limitations documented in the
 [compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 
 Redis RDB/AOF files, PSYNC replication, clustering, authentication,
-and many commands remain. See the [roadmap](docs/ROADMAP.md) and
+maxmemory eviction, and many commands remain. See the [roadmap](docs/ROADMAP.md) and
 [team implementation plan](docs/ReRu_Implementation_Plan.pdf).
