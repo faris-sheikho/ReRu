@@ -3,8 +3,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
     let name = &command[0];
-    if name.eq_ignore_ascii_case(b"DEL") || name.eq_ignore_ascii_case(b"EXISTS") {
+    if name.eq_ignore_ascii_case(b"DEL")
+        || name.eq_ignore_ascii_case(b"UNLINK")
+        || name.eq_ignore_ascii_case(b"EXISTS")
+        || name.eq_ignore_ascii_case(b"TOUCH")
+    {
         Some(command.len() >= 2)
+    } else if name.eq_ignore_ascii_case(b"DBSIZE") {
+        Some(command.len() == 1)
+    } else if name.eq_ignore_ascii_case(b"RENAME") || name.eq_ignore_ascii_case(b"RENAMENX") {
+        Some(command.len() == 3)
+    } else if name.eq_ignore_ascii_case(b"COPY") {
+        Some(command.len() == 3 || command.len() == 4)
     } else if [b"TTL".as_slice(), b"PTTL", b"PERSIST"]
         .iter()
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
@@ -90,12 +100,25 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
             String::from_utf8_lossy(name).to_ascii_lowercase()
         )));
     }
-    if name.eq_ignore_ascii_case(b"DEL") || name.eq_ignore_ascii_case(b"EXISTS") {
+    if name.eq_ignore_ascii_case(b"DBSIZE") {
+        let entries = store.entries.lock().unwrap();
+        let now = Instant::now();
+        let count = entries
+            .values()
+            .filter(|entry| entry.expires_at.is_none_or(|deadline| deadline > now))
+            .count();
+        return Some(format!(":{count}\r\n").into_bytes());
+    }
+    if name.eq_ignore_ascii_case(b"DEL")
+        || name.eq_ignore_ascii_case(b"UNLINK")
+        || name.eq_ignore_ascii_case(b"EXISTS")
+        || name.eq_ignore_ascii_case(b"TOUCH")
+    {
         let mut entries = store.entries.lock().unwrap();
         let mut count = 0;
         for key in &command[1..] {
             remove_expired(&mut entries, key);
-            if name.eq_ignore_ascii_case(b"DEL") {
+            if name.eq_ignore_ascii_case(b"DEL") || name.eq_ignore_ascii_case(b"UNLINK") {
                 if entries.remove(key).is_some() {
                     mark_modified(store, key);
                     count += 1;
@@ -105,6 +128,54 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
             }
         }
         return Some(format!(":{count}\r\n").into_bytes());
+    }
+    if name.eq_ignore_ascii_case(b"RENAME") || name.eq_ignore_ascii_case(b"RENAMENX") {
+        let mut entries = store.entries.lock().unwrap();
+        let source = &command[1];
+        let destination = &command[2];
+        remove_expired(&mut entries, source);
+        remove_expired(&mut entries, destination);
+        if !entries.contains_key(source) {
+            return Some(protocol::error("no such key"));
+        }
+        let nx = name.eq_ignore_ascii_case(b"RENAMENX");
+        if source == destination || (nx && entries.contains_key(destination)) {
+            return Some(if nx {
+                b":0\r\n".to_vec()
+            } else {
+                b"+OK\r\n".to_vec()
+            });
+        }
+        let entry = entries.remove(source).unwrap();
+        entries.insert(destination.clone(), entry);
+        mark_modified(store, source);
+        mark_modified(store, destination);
+        store.changed.notify_all();
+        return Some(if nx {
+            b":1\r\n".to_vec()
+        } else {
+            b"+OK\r\n".to_vec()
+        });
+    }
+    if name.eq_ignore_ascii_case(b"COPY") {
+        if command.len() == 4 && !command[3].eq_ignore_ascii_case(b"REPLACE") {
+            return Some(protocol::error("syntax error"));
+        }
+        let mut entries = store.entries.lock().unwrap();
+        let source = &command[1];
+        let destination = &command[2];
+        remove_expired(&mut entries, source);
+        remove_expired(&mut entries, destination);
+        if source == destination || (command.len() == 3 && entries.contains_key(destination)) {
+            return Some(b":0\r\n".to_vec());
+        }
+        let Some(entry) = entries.get(source).cloned() else {
+            return Some(b":0\r\n".to_vec());
+        };
+        entries.insert(destination.clone(), entry);
+        mark_modified(store, destination);
+        store.changed.notify_all();
+        return Some(b":1\r\n".to_vec());
     }
     if name.eq_ignore_ascii_case(b"TTL") || name.eq_ignore_ascii_case(b"PTTL") {
         let mut entries = store.entries.lock().unwrap();

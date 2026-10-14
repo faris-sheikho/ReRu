@@ -155,6 +155,10 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             b"BLPOP",
             b"XADD",
             b"DEL",
+            b"UNLINK",
+            b"RENAME",
+            b"RENAMENX",
+            b"COPY",
             b"EXPIRE",
             b"PEXPIRE",
             b"PERSIST",
@@ -172,6 +176,10 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
         || !is_mutating(command)
         || response.starts_with(b"-")
         || command[0].eq_ignore_ascii_case(b"DEL")
+        || command[0].eq_ignore_ascii_case(b"UNLINK")
+        || command[0].eq_ignore_ascii_case(b"RENAME")
+        || command[0].eq_ignore_ascii_case(b"RENAMENX")
+        || command[0].eq_ignore_ascii_case(b"COPY")
         || command[0].eq_ignore_ascii_case(b"CONFIG")
         || command[0].eq_ignore_ascii_case(b"BLPOP")
     {

@@ -168,7 +168,9 @@ impl Eviction {
         let keys: Vec<&Vec<u8>> = if [
             b"MGET".as_slice(),
             b"DEL",
+            b"UNLINK",
             b"EXISTS",
+            b"TOUCH",
             b"SUNION",
             b"SINTER",
             b"SDIFF",
@@ -181,6 +183,11 @@ impl Eviction {
             command[1..].iter().step_by(2).collect()
         } else if name.eq_ignore_ascii_case(b"BITOP") {
             command[2..].iter().collect()
+        } else if name.eq_ignore_ascii_case(b"RENAME")
+            || name.eq_ignore_ascii_case(b"RENAMENX")
+            || name.eq_ignore_ascii_case(b"COPY")
+        {
+            command[1..command.len().min(3)].iter().collect()
         } else if name.eq_ignore_ascii_case(b"XREAD") {
             crate::parse_xread(command)
                 .map(|options| options.keys.iter().collect())

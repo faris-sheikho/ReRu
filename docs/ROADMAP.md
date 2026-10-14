@@ -5,7 +5,7 @@ first 20 CodeCrafters milestones, initial stream commands, transactions with
 optimistic locking, initial keyspace commands, core hashes and sets, initial
 sorted sets and bitmaps, common cache-oriented string commands, and optional
 logical-memory bounds with noeviction and allkeys-lru policies and runtime
-memory configuration are
+memory configuration, plus more keyspace commands, are
 implemented. Optional
 ReRu snapshots and ReRu-to-ReRu replication are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.

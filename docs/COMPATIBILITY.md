@@ -15,11 +15,11 @@ tests; it does not certify complete compatibility with Redis.
 | Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SUNION`, `SINTER`, `SDIFF` | Binary members, deduplication, membership, cardinality and read-only set algebra |
 | Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZCOUNT`, `ZREM` | Score-ordered members, rank/index ranges, ZADD NX/XX/GT/LT/CH/INCR |
 | Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT |
-| Keyspace | `TYPE`, `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Multiple deletion/existence keys; expiry across current data types; NX/XX/GT/LT expiry conditions |
+| Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Multiple keys, rename/copy with TTL, expiry conditions |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 
-Total: **72 public command names**. Supporting a command name does not mean that
+Total: **78 public command names**. Supporting a command name does not mean that
 every Redis option for that command is implemented.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
@@ -50,6 +50,11 @@ bounded-memory writes need further performance work. `CONFIG GET/SET` supports
 only the two memory settings; runtime changes are not saved to a config file.
 Redis's `volatile-*`, LFU, random, and TTL policies remain unsupported.
 
+`COPY` supports same-database copy and `REPLACE`; `DB` selection is pending.
+`UNLINK` removes keys immediately but frees memory synchronously, unlike
+Redis's background reclamation. `DBSIZE` counts unexpired keys without an
+active expiry sweep. `TOUCH` updates the in-memory LRU access order.
+
 Sorted sets keep a member lookup map and a score-ordered index. Score changes
 update both indexes. Rank lookup is still linear in the number of members;
 range scans advance through the ordered index. `ZRANGE` supports rank indexes,
@@ -75,14 +80,14 @@ Strings and bitmaps share the same underlying value type.
 
 ## Verification for this increment
 
-The local suite has **86 tests**: 7 unit tests and 79 server integration tests.
+The local suite has **91 tests**: 7 unit tests and 84 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, replica updates, and malformed snapshot payloads. Earlier keyspace,
 list, stream, hash, set, and transaction regression tests remain. Eviction tests
 cover OOM rollback, WATCH, transactions, access order, runtime configuration,
-and snapshot restart. Formatting
-and Clippy are checked.
+and snapshot restart. Keyspace tests cover rename/copy TTL, noeviction rollback,
+WATCH, TOUCH/LRU, and blocking-list wakeup. Formatting and Clippy are checked.
 
 These are ReRu regression tests. A differential suite against a running pinned
 Redis server is still required before making a compatibility claim.
