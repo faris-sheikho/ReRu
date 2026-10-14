@@ -125,6 +125,17 @@ fn mark_modified(store: &Store, key: &[u8]) {
         return;
     }
     drop(staged);
+    store.eviction.note_modified(key);
+    mark_evicted(store, key);
+}
+
+fn mark_evicted(store: &Store, key: &[u8]) {
+    let mut staged = store.staged_keys.lock().unwrap();
+    if let Some(keys) = staged.as_mut() {
+        keys.insert(key.to_vec());
+        return;
+    }
+    drop(staged);
     store.pending_keys.lock().unwrap().insert(key.to_vec());
     invalidate_watch(store, key);
 }
@@ -200,8 +211,8 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
     mark_modified(store, &command[1]);
 }
 
-// The caller holds command_gate. A bounded noeviction write is staged so an OOM
-// response cannot leave partial data or invalidate WATCH registrations.
+// The caller holds command_gate. Bounded writes under noeviction and volatile
+// policies are staged so an OOM cannot leave partial data or invalidate WATCH.
 fn execute_checked(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
     let settings = store.eviction.settings();
     if !is_mutating(command)
@@ -212,11 +223,10 @@ fn execute_checked(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
         record_write(store, command, &response);
         return response;
     }
-    if settings.policy == eviction::Policy::AllKeysLru {
+    if settings.policy.is_allkeys() {
         let response = execute_command(command, store, allow_blocking);
         record_write(store, command, &response);
         if !response.starts_with(b"-") {
-            store.eviction.touch(command, store);
             store.eviction.evict(store);
         }
         return response;
@@ -228,9 +238,13 @@ fn execute_checked(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
     let response = execute_command(command, store, allow_blocking);
     record_write(store, command, &response);
     let after_bytes = eviction::dataset_bytes(&store.entries.lock().unwrap());
-    let overflow = after_bytes > settings.maxmemory && after_bytes > before_bytes;
+    let failed = response.starts_with(b"-");
+    let overflow = !failed
+        && after_bytes > settings.maxmemory
+        && after_bytes > before_bytes
+        && (settings.policy == eviction::Policy::NoEviction || !store.eviction.evict(store));
     let changed = store.staged_keys.lock().unwrap().take().unwrap();
-    if overflow || response.starts_with(b"-") {
+    if overflow || failed {
         *store.entries.lock().unwrap() = before;
         return if overflow {
             b"-OOM command not allowed when used memory > 'maxmemory'.\r\n".to_vec()
@@ -239,7 +253,12 @@ fn execute_checked(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
         };
     }
     for key in changed {
-        mark_modified(store, &key);
+        if store.entries.lock().unwrap().contains_key(&key) {
+            mark_modified(store, &key);
+        } else {
+            store.eviction.forget(&key);
+            mark_evicted(store, &key);
+        }
     }
     response
 }
@@ -519,7 +538,9 @@ fn xread_ids(
 
 fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
     store.eviction.touch(command, store);
-    if command[0].eq_ignore_ascii_case(b"CONFIG") {
+    if command[0].eq_ignore_ascii_case(b"INFO") {
+        eviction::info(command, store)
+    } else if command[0].eq_ignore_ascii_case(b"CONFIG") {
         eviction::execute_config(command, store)
     } else if let Some(response) = cache::execute(command, store) {
         response
@@ -944,7 +965,7 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
         valid
     } else if let Some(valid) = keyspace::valid_arity(command) {
         valid
-    } else if name.eq_ignore_ascii_case(b"PING") {
+    } else if name.eq_ignore_ascii_case(b"INFO") || name.eq_ignore_ascii_case(b"PING") {
         arity <= 2
     } else if name.eq_ignore_ascii_case(b"UNWATCH") {
         arity == 1
@@ -1117,7 +1138,7 @@ fn main() -> io::Result<()> {
         let value = args.get(index + 1).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy noeviction|allkeys-lru]",
+                "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
             )
         })?;
         match args[index].as_str() {
@@ -1153,7 +1174,7 @@ fn main() -> io::Result<()> {
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy noeviction|allkeys-lru]",
+                    "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
                 ))
             }
         }

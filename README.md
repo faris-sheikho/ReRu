@@ -18,8 +18,12 @@ On Unix, `./your_program.sh` builds and starts it. `--snapshot` saves the datase
 after writes and restores it on startup. Its file format is specific to ReRu.
 `--replicaof` starts a read-only ReRu replica that resynchronizes from the primary.
 `--maxmemory` uses a ReRu dataset-size estimate. Its policies are `noeviction`
-(default) and `allkeys-lru`; the default limit is `0` (unlimited).
+(default), `allkeys-lru`, `allkeys-lrm`, `allkeys-lfu`, `allkeys-random`,
+`volatile-lru`, `volatile-lrm`, `volatile-lfu`, `volatile-random`, and
+`volatile-ttl`; the default limit is `0` (unlimited).
 `CONFIG GET/SET` can inspect and change these two settings at runtime.
+`INFO memory` and `INFO stats` report the estimated dataset size and eviction
+count. These memory figures are not the process's actual RAM use.
 
 ## Current support
 
@@ -32,17 +36,17 @@ after writes and restores it on startup. Its file format is specific to ReRu.
 - Set membership, removal, cardinality, `SUNION`, `SINTER`, and `SDIFF`
 - Sorted-set insertion, score/rank lookup, ranges, counts, and removal
 - Bitmap operations on strings: `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, and `BITPOS`
-- Optional memory limit with OOM rejection or least-recently-used key eviction
+- Optional memory limit with OOM rejection and ten maxmemory policies
 - `CONFIG GET/SET` for `maxmemory` and `maxmemory-policy`
 - `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, and `PERSIST`
 - `COPY`, `RENAME`, `RENAMENX`, `UNLINK`, `TOUCH`, and `DBSIZE`
 - `MULTI`, `EXEC`, `DISCARD`, `WATCH`, and `UNWATCH`, including optimistic locking
   on primary and replica connections
 
-78 public command names are supported, with limitations documented in the
+79 public command names are supported, with limitations documented in the
 [compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 
 Redis RDB/AOF files, PSYNC replication, clustering, authentication,
-other eviction policies, and many commands remain. See the [roadmap](docs/ROADMAP.md) and
+production-grade memory accounting, and many commands remain. See the [roadmap](docs/ROADMAP.md) and
 [team implementation plan](docs/ReRu_Implementation_Plan.pdf).

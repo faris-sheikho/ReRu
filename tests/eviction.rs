@@ -161,3 +161,168 @@ fn config_get_set_changes_memory_policy_at_runtime() {
     assert_eq!(watcher.call(&[b"GET", b"b"]), queued());
     assert_eq!(watcher.call(&[b"EXEC"]), Reply::Array(None));
 }
+
+#[test]
+fn volatile_policies_only_evict_keys_with_ttl_and_roll_back_when_none_remain() {
+    for policy in [
+        "volatile-lru",
+        "volatile-lrm",
+        "volatile-lfu",
+        "volatile-random",
+        "volatile-ttl",
+    ] {
+        let server = Server::start_with(&["--maxmemory", "340", "--maxmemory-policy", policy]);
+        let mut client = Client::new(&server);
+        let value = vec![b'v'; 100];
+        assert_eq!(
+            client.call(&[b"SET", b"ttl", &value, b"PX", b"60000"]),
+            ok()
+        );
+        assert_eq!(client.call(&[b"SET", b"keep", &value]), ok());
+        assert_eq!(client.call(&[b"SET", b"next", &value]), ok());
+        assert_eq!(client.call(&[b"GET", b"ttl"]), Reply::Bulk(None));
+        assert_eq!(client.call(&[b"GET", b"keep"]), bulk(&value));
+        assert_eq!(client.call(&[b"GET", b"next"]), bulk(&value));
+        assert!(matches!(
+            client.call(&[b"SET", b"last", &value]),
+            Reply::Error(message) if message.starts_with(b"OOM ")
+        ));
+        assert_eq!(client.call(&[b"GET", b"last"]), Reply::Bulk(None));
+        assert_eq!(client.call(&[b"DBSIZE"]), Reply::Integer(2));
+    }
+}
+
+#[test]
+fn volatile_ttl_evicts_shortest_remaining_deadline() {
+    let server = Server::start_with(&["--maxmemory", "340", "--maxmemory-policy", "volatile-ttl"]);
+    let mut client = Client::new(&server);
+    let value = vec![b'v'; 100];
+    assert_eq!(
+        client.call(&[b"SET", b"fast", &value, b"PX", b"10000"]),
+        ok()
+    );
+    assert_eq!(
+        client.call(&[b"SET", b"slow", &value, b"PX", b"60000"]),
+        ok()
+    );
+    assert_eq!(client.call(&[b"SET", b"keep", &value]), ok());
+    assert_eq!(client.call(&[b"GET", b"fast"]), Reply::Bulk(None));
+    assert_eq!(client.call(&[b"GET", b"slow"]), bulk(&value));
+    assert_eq!(client.call(&[b"GET", b"keep"]), bulk(&value));
+}
+
+#[test]
+fn allkeys_lfu_and_lrm_choose_the_cold_or_old_write() {
+    let value = vec![b'v'; 100];
+    {
+        let server =
+            Server::start_with(&["--maxmemory", "345", "--maxmemory-policy", "allkeys-lfu"]);
+        let mut client = Client::new(&server);
+        assert_eq!(client.call(&[b"SET", b"cold", &value]), ok());
+        assert_eq!(client.call(&[b"SET", b"hot", &value]), ok());
+        for _ in 0..8 {
+            assert_eq!(client.call(&[b"GET", b"hot"]), bulk(&value));
+        }
+        assert_eq!(client.call(&[b"SET", b"new", &value]), ok());
+        assert_eq!(client.call(&[b"GET", b"cold"]), Reply::Bulk(None));
+        assert_eq!(client.call(&[b"GET", b"hot"]), bulk(&value));
+    }
+    {
+        let server =
+            Server::start_with(&["--maxmemory", "345", "--maxmemory-policy", "allkeys-lrm"]);
+        let mut client = Client::new(&server);
+        assert_eq!(client.call(&[b"SET", b"recent", &value]), ok());
+        assert_eq!(client.call(&[b"SET", b"older", &value]), ok());
+        assert_eq!(client.call(&[b"SET", b"recent", &value]), ok());
+        assert_eq!(client.call(&[b"SET", b"new", &value]), ok());
+        assert_eq!(client.call(&[b"GET", b"older"]), Reply::Bulk(None));
+        assert_eq!(client.call(&[b"GET", b"recent"]), bulk(&value));
+    }
+}
+
+#[test]
+fn allkeys_random_enforces_limit_and_runtime_policy_name() {
+    let server = Server::start();
+    let mut client = Client::new(&server);
+    assert_eq!(
+        client.call(&[
+            b"CONFIG",
+            b"SET",
+            b"maxmemory",
+            b"330",
+            b"maxmemory-policy",
+            b"allkeys-random"
+        ]),
+        ok()
+    );
+    assert_eq!(
+        client.call(&[b"CONFIG", b"GET", b"maxmemory-policy"]),
+        array(vec![bulk(b"maxmemory-policy"), bulk(b"allkeys-random")])
+    );
+    let value = vec![b'v'; 100];
+    for key in [b"a", b"b", b"c"] {
+        assert_eq!(client.call(&[b"SET", key, &value]), ok());
+    }
+    assert_eq!(client.call(&[b"DBSIZE"]), Reply::Integer(2));
+}
+
+#[test]
+fn volatile_oom_preserves_data_and_watches() {
+    let server = Server::start_with(&["--maxmemory", "220", "--maxmemory-policy", "volatile-lru"]);
+    let mut client = Client::new(&server);
+    let mut watcher = Client::new(&server);
+    let value = vec![b'x'; 100];
+    assert_eq!(client.call(&[b"SET", b"keep", &value]), ok());
+    assert_eq!(watcher.call(&[b"WATCH", b"new"]), ok());
+    assert!(matches!(
+        client.call(&[b"SET", b"new", &value]),
+        Reply::Error(message) if message.starts_with(b"OOM ")
+    ));
+    assert_eq!(client.call(&[b"GET", b"keep"]), bulk(&value));
+    assert_eq!(client.call(&[b"GET", b"new"]), Reply::Bulk(None));
+    assert_eq!(watcher.call(&[b"MULTI"]), ok());
+    assert_eq!(watcher.call(&[b"GET", b"keep"]), queued());
+    assert_eq!(watcher.call(&[b"EXEC"]), array(vec![bulk(&value)]));
+}
+
+#[test]
+fn info_reports_estimated_memory_and_evictions() {
+    let server = Server::start_with(&["--maxmemory", "330", "--maxmemory-policy", "allkeys-lru"]);
+    let mut client = Client::new(&server);
+    let value = vec![b'v'; 100];
+    for key in [b"a", b"b", b"c"] {
+        assert_eq!(client.call(&[b"SET", key, &value]), ok());
+    }
+    let Reply::Bulk(Some(memory)) = client.call(&[b"INFO", b"memory"]) else {
+        panic!("INFO memory should return a bulk string");
+    };
+    let memory = String::from_utf8(memory).unwrap();
+    assert!(memory.contains("used_memory:330\r\n"));
+    assert!(memory.contains("maxmemory:330\r\n"));
+    assert!(memory.contains("maxmemory_policy:allkeys-lru\r\n"));
+    let Reply::Bulk(Some(stats)) = client.call(&[b"INFO", b"stats"]) else {
+        panic!("INFO stats should return a bulk string");
+    };
+    assert!(String::from_utf8(stats)
+        .unwrap()
+        .contains("evicted_keys:1\r\n"));
+}
+
+#[test]
+fn deleted_key_does_not_keep_its_old_lfu_history() {
+    let server = Server::start_with(&["--maxmemory", "340", "--maxmemory-policy", "allkeys-lfu"]);
+    let mut client = Client::new(&server);
+    let value = vec![b'v'; 100];
+    assert_eq!(client.call(&[b"SET", b"cold", &value]), ok());
+    assert_eq!(client.call(&[b"SET", b"hot", &value]), ok());
+    for _ in 0..5 {
+        assert_eq!(client.call(&[b"GET", b"cold"]), bulk(&value));
+        assert_eq!(client.call(&[b"GET", b"hot"]), bulk(&value));
+    }
+    assert_eq!(client.call(&[b"DEL", b"hot"]), Reply::Integer(1));
+    assert_eq!(client.call(&[b"SET", b"hot", &value]), ok());
+    assert_eq!(client.call(&[b"SET", b"new", &value]), ok());
+    assert_eq!(client.call(&[b"GET", b"cold"]), bulk(&value));
+    assert_eq!(client.call(&[b"GET", b"hot"]), Reply::Bulk(None));
+    assert_eq!(client.call(&[b"GET", b"new"]), bulk(&value));
+}

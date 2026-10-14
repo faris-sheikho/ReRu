@@ -18,8 +18,9 @@ tests; it does not certify complete compatibility with Redis.
 | Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Multiple keys, rename/copy with TTL, expiry conditions |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
+| Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
 
-Total: **78 public command names**. Supporting a command name does not mean that
+Total: **79 public command names**. Supporting a command name does not mean that
 every Redis option for that command is implemented.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
@@ -37,23 +38,33 @@ as unspecified. HMSET is supported for older clients; prefer HSET for new code.
 ## Memory limit and eviction
 
 `--maxmemory SIZE` accepts bytes or `k`/`kb`, `m`/`mb`, and `g`/`gb` suffixes.
-The default `0` means unlimited. `--maxmemory-policy` accepts `noeviction`
-(default) or `allkeys-lru`. ReRu estimates logical dataset bytes from keys,
-values, and fixed per-entry overhead; this is **not** Redis allocator memory,
-process RSS, or an exact RAM ceiling. LRU is exact over access timestamps kept
-in memory, whereas Redis uses a sampled approximation. An oversize write under
-`noeviction` returns OOM and rolls back the command, including its WATCH effects.
-Evictions are included in ReRu snapshots and replication. Loaded snapshots are
-trimmed to the limit under `allkeys-lru`; recency is not stored in snapshots.
-Memory accounting scans the dataset and noeviction rollback copies it, so
-bounded-memory writes need further performance work. `CONFIG GET/SET` supports
-only the two memory settings; runtime changes are not saved to a config file.
-Redis's `volatile-*`, LFU, random, and TTL policies remain unsupported.
+The default `0` means unlimited. `--maxmemory-policy` accepts `noeviction`,
+`allkeys-lru`, `allkeys-lrm`, `allkeys-lfu`, `allkeys-random`, `volatile-lru`,
+`volatile-lrm`, `volatile-lfu`, `volatile-random`, and `volatile-ttl`. ReRu
+estimates logical dataset bytes from keys, values, and fixed per-entry overhead;
+this is **not** Redis allocator memory, process RSS, or an exact RAM ceiling.
+Allkeys policies may evict any live key. Volatile policies only evict live keys
+with expiry; a growing write returns OOM and rolls back if those candidates
+cannot free enough space. `noeviction` also rolls back growing writes on OOM,
+including their WATCH effects. Evictions invalidate WATCH and are included in
+ReRu snapshots and replication. Loaded snapshots are trimmed to the limit when
+an allkeys policy is selected; recency and frequency are not persisted.
+
+LRU and LRM use exact in-memory order; LFU uses a simplified frequency counter
+with minute-based decay. Redis uses sampled eviction and a different LFU
+algorithm. Random policies pick from a shuffled candidate order, and
+`volatile-ttl` picks the earliest expiry. Memory accounting scans the dataset;
+bounded writes under noeviction and volatile policies copy it for rollback.
+These paths need further performance work. `INFO memory` reports the logical
+estimate as `used_memory` and `reru_estimated_dataset_bytes`; `INFO stats`
+reports `evicted_keys`. Other INFO fields and sections are not implemented.
+`CONFIG GET/SET` supports only the two memory settings; runtime changes are not
+saved to a config file.
 
 `COPY` supports same-database copy and `REPLACE`; `DB` selection is pending.
 `UNLINK` removes keys immediately but frees memory synchronously, unlike
 Redis's background reclamation. `DBSIZE` counts unexpired keys without an
-active expiry sweep. `TOUCH` updates the in-memory LRU access order.
+active expiry sweep. `TOUCH` updates the in-memory access order and frequency.
 
 Sorted sets keep a member lookup map and a score-ordered index. Score changes
 update both indexes. Rank lookup is still linear in the number of members;
@@ -80,13 +91,13 @@ Strings and bitmaps share the same underlying value type.
 
 ## Verification for this increment
 
-The local suite has **91 tests**: 7 unit tests and 84 server integration tests.
+The local suite has **98 tests**: 7 unit tests and 91 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, replica updates, and malformed snapshot payloads. Earlier keyspace,
 list, stream, hash, set, and transaction regression tests remain. Eviction tests
-cover OOM rollback, WATCH, transactions, access order, runtime configuration,
-and snapshot restart. Keyspace tests cover rename/copy TTL, noeviction rollback,
+cover OOM rollback, WATCH, transactions, policy selection, INFO counters,
+access order, runtime configuration, and snapshot restart. Keyspace tests cover rename/copy TTL, noeviction rollback,
 WATCH, TOUCH/LRU, and blocking-list wakeup. Formatting and Clippy are checked.
 
 These are ReRu regression tests. A differential suite against a running pinned
@@ -96,7 +107,7 @@ Redis server is still required before making a compatibility claim.
 
 Additional sorted-set and bitmap commands, geospatial commands, stream consumer groups,
 pub/sub, scripting, broader command options, Redis RDB/AOF, PSYNC, authentication,
-ACLs, RESP3, cluster/failover, full eviction policies, bounded resource usage and performance engineering
+ACLs, RESP3, cluster/failover, Redis-exact eviction internals, bounded resource usage and performance engineering
 remain. Blocking clients do not yet receive Redis's FIFO waiter guarantees.
 Hash field expiry, HSCAN, HINCRBYFLOAT, set scans/random selection, SMOVE,
 and set algebra STORE variants are also pending.

@@ -1,5 +1,6 @@
-use crate::{mark_modified, protocol, Entry, Store, Value};
-use std::collections::HashMap;
+use crate::{mark_evicted, protocol, Entry, Store, Value};
+use std::collections::{hash_map::RandomState, HashMap};
+use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -8,6 +9,14 @@ use std::time::Instant;
 pub enum Policy {
     NoEviction,
     AllKeysLru,
+    AllKeysLrm,
+    AllKeysLfu,
+    AllKeysRandom,
+    VolatileLru,
+    VolatileLrm,
+    VolatileLfu,
+    VolatileRandom,
+    VolatileTtl,
 }
 
 impl Policy {
@@ -15,6 +24,14 @@ impl Policy {
         match value.to_ascii_lowercase().as_str() {
             "noeviction" => Some(Self::NoEviction),
             "allkeys-lru" => Some(Self::AllKeysLru),
+            "allkeys-lrm" => Some(Self::AllKeysLrm),
+            "allkeys-lfu" => Some(Self::AllKeysLfu),
+            "allkeys-random" => Some(Self::AllKeysRandom),
+            "volatile-lru" => Some(Self::VolatileLru),
+            "volatile-lrm" => Some(Self::VolatileLrm),
+            "volatile-lfu" => Some(Self::VolatileLfu),
+            "volatile-random" => Some(Self::VolatileRandom),
+            "volatile-ttl" => Some(Self::VolatileTtl),
             _ => None,
         }
     }
@@ -23,7 +40,33 @@ impl Policy {
         match self {
             Self::NoEviction => "noeviction",
             Self::AllKeysLru => "allkeys-lru",
+            Self::AllKeysLrm => "allkeys-lrm",
+            Self::AllKeysLfu => "allkeys-lfu",
+            Self::AllKeysRandom => "allkeys-random",
+            Self::VolatileLru => "volatile-lru",
+            Self::VolatileLrm => "volatile-lrm",
+            Self::VolatileLfu => "volatile-lfu",
+            Self::VolatileRandom => "volatile-random",
+            Self::VolatileTtl => "volatile-ttl",
         }
+    }
+
+    pub fn is_allkeys(self) -> bool {
+        matches!(
+            self,
+            Self::AllKeysLru | Self::AllKeysLrm | Self::AllKeysLfu | Self::AllKeysRandom
+        )
+    }
+
+    fn is_volatile(self) -> bool {
+        matches!(
+            self,
+            Self::VolatileLru
+                | Self::VolatileLrm
+                | Self::VolatileLfu
+                | Self::VolatileRandom
+                | Self::VolatileTtl
+        )
     }
 }
 
@@ -85,6 +128,32 @@ pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
     })
 }
 
+pub fn info(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
+    if command.len() > 2 {
+        return protocol::error("wrong number of arguments for 'info' command");
+    }
+    let section = command.get(1).map(Vec::as_slice);
+    let memory = section.is_none_or(|name| name.eq_ignore_ascii_case(b"memory"));
+    let stats = section.is_none_or(|name| name.eq_ignore_ascii_case(b"stats"));
+    let mut report = String::new();
+    if memory {
+        let settings = store.eviction.settings();
+        let used = dataset_bytes(&store.entries.lock().unwrap());
+        report.push_str(&format!(
+            "# Memory\r\nused_memory:{used}\r\nmaxmemory:{}\r\nmaxmemory_policy:{}\r\nreru_estimated_dataset_bytes:{used}\r\n\r\n",
+            settings.maxmemory,
+            settings.policy.name()
+        ));
+    }
+    if stats {
+        report.push_str(&format!(
+            "# Stats\r\nevicted_keys:{}\r\n\r\n",
+            store.eviction.evicted_keys.load(Ordering::Relaxed)
+        ));
+    }
+    protocol::bulk(report.as_bytes())
+}
+
 pub fn execute_config(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
     if valid_arity(command) != Some(true) {
         return protocol::error("wrong number of arguments for 'config' command");
@@ -135,9 +204,24 @@ pub fn execute_config(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
 
 pub struct Eviction {
     settings: Mutex<Settings>,
-    accesses: Mutex<HashMap<Vec<u8>, u64>>,
+    accesses: Mutex<HashMap<Vec<u8>, Access>>,
     clock: AtomicU64,
     pub evicted_keys: AtomicU64,
+}
+
+#[derive(Clone, Copy)]
+struct Access {
+    last_access: u64,
+    last_write: u64,
+    frequency: u32,
+    last_decay: Instant,
+}
+
+impl Access {
+    fn decayed_frequency(self, now: Instant) -> u32 {
+        let minutes = now.saturating_duration_since(self.last_decay).as_secs() / 60;
+        self.frequency >> minutes.min(31)
+    }
 }
 
 impl Eviction {
@@ -159,9 +243,30 @@ impl Eviction {
         self.evict(store);
     }
 
+    pub fn note_modified(&self, key: &[u8]) {
+        let settings = self.settings();
+        if settings.maxmemory == 0 || settings.policy == Policy::NoEviction {
+            return;
+        }
+        let tick = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = Instant::now();
+        let mut accesses = self.accesses.lock().unwrap();
+        let access = accesses.entry(key.to_vec()).or_insert(Access {
+            last_access: tick,
+            last_write: tick,
+            frequency: 1,
+            last_decay: now,
+        });
+        access.last_write = tick;
+    }
+
+    pub fn forget(&self, key: &[u8]) {
+        self.accesses.lock().unwrap().remove(key);
+    }
+
     pub fn touch(&self, command: &[Vec<u8>], store: &Store) {
         let settings = self.settings();
-        if settings.maxmemory == 0 || settings.policy != Policy::AllKeysLru || command.len() < 2 {
+        if settings.maxmemory == 0 || settings.policy == Policy::NoEviction || command.len() < 2 {
             return;
         }
         let name = &command[0];
@@ -204,44 +309,98 @@ impl Eviction {
         };
         let entries = store.entries.lock().unwrap();
         let mut accesses = self.accesses.lock().unwrap();
+        let now = Instant::now();
         for key in keys {
-            if entries.contains_key(key) {
-                accesses.insert(key.clone(), self.clock.fetch_add(1, Ordering::Relaxed) + 1);
+            if entries
+                .get(key)
+                .is_some_and(|entry| entry.expires_at.is_none_or(|at| at > now))
+            {
+                let tick = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                let access = accesses.entry(key.clone()).or_insert(Access {
+                    last_access: tick,
+                    last_write: 0,
+                    frequency: 0,
+                    last_decay: now,
+                });
+                access.frequency = access.decayed_frequency(now).saturating_add(1);
+                access.last_decay = now;
+                access.last_access = tick;
             }
         }
     }
 
-    pub fn evict(&self, store: &Store) {
+    pub fn evict(&self, store: &Store) -> bool {
         let settings = self.settings();
-        if settings.maxmemory == 0 || settings.policy != Policy::AllKeysLru {
-            return;
+        if settings.maxmemory == 0 || settings.policy == Policy::NoEviction {
+            return true;
         }
         let mut entries = store.entries.lock().unwrap();
         let mut accesses = self.accesses.lock().unwrap();
+        accesses.retain(|key, _| entries.contains_key(key));
         let mut used = dataset_bytes(&entries);
-        while used > settings.maxmemory {
-            let Some(key) = entries
-                .iter()
-                .filter(|(_, entry)| entry.expires_at.is_none_or(|at| at > Instant::now()))
-                .min_by(|(left, _), (right, _)| {
-                    accesses
-                        .get(*left)
-                        .copied()
-                        .unwrap_or(0)
-                        .cmp(&accesses.get(*right).copied().unwrap_or(0))
-                        .then_with(|| left.cmp(right))
-                })
-                .map(|(key, _)| key.clone())
-            else {
+        if used <= settings.maxmemory {
+            return true;
+        }
+        let now = Instant::now();
+        let random = RandomState::new();
+        let mut candidates: Vec<_> = entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.expires_at.is_none_or(|at| at > now)
+                    && (!settings.policy.is_volatile() || entry.expires_at.is_some())
+            })
+            .map(|(key, entry)| {
+                let access = accesses.get(key).copied();
+                let priority = match settings.policy {
+                    Policy::AllKeysLru | Policy::VolatileLru => {
+                        access.map_or(0, |access| access.last_access)
+                    }
+                    Policy::AllKeysLrm | Policy::VolatileLrm => {
+                        access.map_or(0, |access| access.last_write)
+                    }
+                    Policy::AllKeysLfu | Policy::VolatileLfu => {
+                        u64::from(access.map_or(0, |access| access.decayed_frequency(now)))
+                    }
+                    Policy::AllKeysRandom | Policy::VolatileRandom => random.hash_one(key),
+                    Policy::VolatileTtl => entry
+                        .expires_at
+                        .unwrap()
+                        .saturating_duration_since(now)
+                        .as_millis()
+                        .min(u128::from(u64::MAX))
+                        as u64,
+                    Policy::NoEviction => unreachable!(),
+                };
+                (key.clone(), entry_bytes(key, entry), priority)
+            })
+            .collect();
+        candidates.sort_unstable_by(|left, right| {
+            left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0))
+        });
+        let mut victims = Vec::new();
+        for (key, bytes, _) in candidates {
+            if used <= settings.maxmemory {
                 break;
-            };
-            let entry = entries.remove(&key).unwrap();
-            used = used.saturating_sub(entry_bytes(&key, &entry));
-            accesses.remove(&key);
-            self.evicted_keys.fetch_add(1, Ordering::Relaxed);
-            mark_modified(store, &key);
+            }
+            used = used.saturating_sub(bytes);
+            victims.push(key);
+        }
+        if used > settings.maxmemory {
+            return false;
+        }
+        for key in &victims {
+            entries.remove(key);
+            accesses.remove(key);
         }
         accesses.retain(|key, _| entries.contains_key(key));
+        drop(accesses);
+        drop(entries);
+        self.evicted_keys
+            .fetch_add(victims.len() as u64, Ordering::Relaxed);
+        for key in victims {
+            mark_evicted(store, &key);
+        }
+        true
     }
 }
 

@@ -4,9 +4,8 @@ ReRu is an incremental Rust implementation of Redis-compatible behavior. The
 first 20 CodeCrafters milestones, initial stream commands, transactions with
 optimistic locking, initial keyspace commands, core hashes and sets, initial
 sorted sets and bitmaps, common cache-oriented string commands, and optional
-logical-memory bounds with noeviction and allkeys-lru policies and runtime
-memory configuration, plus more keyspace commands, are
-implemented. Optional
+logical-memory bounds with ten eviction policies, runtime memory configuration,
+partial INFO memory/stats, and more keyspace commands are implemented. Optional
 ReRu snapshots and ReRu-to-ReRu replication are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
 Redis 8.10.2 is the pinned compatibility reference. The current Rust code uses
@@ -33,7 +32,7 @@ not been selected.
 4. Add Redis-compatible RDB and AOF persistence with restart and recovery tests.
 5. Add Redis PSYNC replication, failover, clustering, authentication, and
    configuration.
-6. Add the remaining maxmemory policies, RESP3, performance and resource controls, operational tooling, and
+6. Bring maxmemory accounting and eviction internals closer to Redis, then add RESP3, performance and resource controls, operational tooling, and
    compatibility testing at scale.
 
 ## Current limits
@@ -48,8 +47,8 @@ not been selected.
 - Each client uses one operating-system thread. There is no configured client
   limit. The optional maxmemory ceiling uses estimated logical dataset size,
   not process memory. Bitmap values have a 64 MiB growth cap.
-- Noeviction and allkeys-lru are available. Redis's other eviction policies,
-  sampled LRU behavior, and most CONFIG parameters are not implemented.
+- Ten maxmemory policies are available. ReRu's memory accounting, LRU/LFU
+  algorithms, INFO output, and most CONFIG parameters are not Redis exact.
 - Blocking list operations wake waiting clients, but Redis's FIFO waiter
   ordering is not implemented yet.
 - This project is not a production Redis replacement at this stage.
