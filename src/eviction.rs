@@ -279,6 +279,9 @@ impl Eviction {
             b"SUNION",
             b"SINTER",
             b"SDIFF",
+            b"SUNIONSTORE",
+            b"SINTERSTORE",
+            b"SDIFFSTORE",
         ]
         .iter()
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
@@ -291,6 +294,9 @@ impl Eviction {
         } else if name.eq_ignore_ascii_case(b"RENAME")
             || name.eq_ignore_ascii_case(b"RENAMENX")
             || name.eq_ignore_ascii_case(b"COPY")
+            || name.eq_ignore_ascii_case(b"LMOVE")
+            || name.eq_ignore_ascii_case(b"RPOPLPUSH")
+            || name.eq_ignore_ascii_case(b"SMOVE")
         {
             command[1..command.len().min(3)].iter().collect()
         } else if name.eq_ignore_ascii_case(b"XREAD") {

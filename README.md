@@ -33,11 +33,14 @@ count. These memory figures are not the process's actual RAM use.
 
 - RESP2, concurrent clients, strings, lists, streams, hashes, sets, and sorted sets; key expiry
 - `PING`, `ECHO`, `SET`, `GET`, `INCR`, `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP`, `TYPE`
+- Additional list editing and movement: `RPOP`, `LINDEX`, `LSET`, `LTRIM`,
+  `LINSERT`, `LPUSHX`, `RPUSHX`, `LMOVE`, `RPOPLPUSH`, `LPOS`, and `LREM`
 - Cache-oriented string operations: conditional/expiring `SET`, `GETEX`, `GETDEL`,
   `MGET`, `MSET`, `MSETNX`, `APPEND`, and `STRLEN`
 - Initial `XADD`, `XRANGE`, `XREAD`, and `XLEN` support
 - Hash fields: `HSET`, `HGET`, multi-field operations, enumeration, deletion, and `HINCRBY`
-- Set membership, removal, cardinality, `SUNION`, `SINTER`, and `SDIFF`
+- Set membership, removal, cardinality, random selection, moves, and
+  `SUNION`/`SINTER`/`SDIFF` with destination storing variants
 - Sorted-set insertion, score/rank lookup, ranges, counts, and removal
 - Bitmap operations on strings: `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, and `BITPOS`
 - Optional memory limit with OOM rejection and ten maxmemory policies
@@ -52,7 +55,7 @@ count. These memory figures are not the process's actual RAM use.
 - Optional append-only persistence with restart and partial-tail recovery;
   `EXPIREAT` and `PEXPIREAT` for absolute key expiry
 
-93 public command names are supported, with limitations documented in the
+110 public command names are supported, with limitations documented in the
 [compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 

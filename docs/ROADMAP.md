@@ -1,7 +1,7 @@
 # ReRu roadmap
 
 ReRu is an incremental Rust implementation of Redis-compatible behavior. The
-first 20 CodeCrafters milestones, initial stream commands, transactions with
+first 20 CodeCrafters milestones, expanded list and set operations, initial stream commands, transactions with
 optimistic locking, initial keyspace commands, core hashes and sets, initial
 sorted sets and bitmaps, common cache-oriented string commands, and optional
 logical-memory bounds with ten eviction policies, runtime memory configuration,

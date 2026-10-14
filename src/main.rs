@@ -4,6 +4,7 @@ mod cache;
 mod collections;
 mod eviction;
 mod keyspace;
+mod list_ops;
 mod persistence;
 mod protocol;
 mod pubsub;
@@ -158,6 +159,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             .get(1)
             .is_some_and(|name| name.eq_ignore_ascii_case(b"SET")))
         || cache::is_mutating(command)
+        || list_ops::is_mutating(command)
         || bitmaps::is_mutating(command)
         || sorted_sets::is_mutating(command)
         || collections::is_mutating(command)
@@ -187,6 +189,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
 fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
     // Collection handlers record real changes themselves, including no-op checks.
     if cache::valid_arity(command).is_some()
+        || list_ops::valid_arity(command).is_some()
         || bitmaps::valid_arity(command).is_some()
         || sorted_sets::valid_arity(command).is_some()
         || collections::valid_arity(command).is_some()
@@ -571,6 +574,8 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
     } else if let Some(response) = pubsub::execute(command, &store.pubsub) {
         response
     } else if let Some(response) = cache::execute(command, store) {
+        response
+    } else if let Some(response) = list_ops::execute(command, store) {
         response
     } else if let Some(response) = bitmaps::execute(command, store) {
         response
@@ -986,6 +991,8 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     } else if let Some(valid) = pubsub::valid_arity(command) {
         valid
     } else if let Some(valid) = cache::valid_arity(command) {
+        valid
+    } else if let Some(valid) = list_ops::valid_arity(command) {
         valid
     } else if let Some(valid) = bitmaps::valid_arity(command) {
         valid

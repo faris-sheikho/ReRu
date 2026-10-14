@@ -1,5 +1,7 @@
 use crate::{mark_modified, protocol, remove_expired, Entry, Store, Value};
+use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
 
 #[derive(Clone, Copy)]
 enum Command {
@@ -24,6 +26,12 @@ enum Command {
     Sunion,
     Sinter,
     Sdiff,
+    Sunionstore,
+    Sinterstore,
+    Sdiffstore,
+    Smove,
+    Spop,
+    Srandmember,
 }
 
 const COMMANDS: &[(&[u8], Command)] = &[
@@ -48,6 +56,12 @@ const COMMANDS: &[(&[u8], Command)] = &[
     (b"SUNION", Command::Sunion),
     (b"SINTER", Command::Sinter),
     (b"SDIFF", Command::Sdiff),
+    (b"SUNIONSTORE", Command::Sunionstore),
+    (b"SINTERSTORE", Command::Sinterstore),
+    (b"SDIFFSTORE", Command::Sdiffstore),
+    (b"SMOVE", Command::Smove),
+    (b"SPOP", Command::Spop),
+    (b"SRANDMEMBER", Command::Srandmember),
 ];
 
 fn parse(name: &[u8]) -> Option<Command> {
@@ -67,6 +81,9 @@ impl Command {
             Hmget | Hdel | Sadd | Srem | Smismember => count >= 3,
             Hgetall | Hlen | Hkeys | Hvals | Smembers | Scard => count == 2,
             Sunion | Sinter | Sdiff => count >= 2,
+            Sunionstore | Sinterstore | Sdiffstore => count >= 3,
+            Smove => count == 4,
+            Spop | Srandmember => count == 2 || count == 3,
         }
     }
 
@@ -80,6 +97,11 @@ impl Command {
                 | Self::Hincrby
                 | Self::Sadd
                 | Self::Srem
+                | Self::Sunionstore
+                | Self::Sinterstore
+                | Self::Sdiffstore
+                | Self::Smove
+                | Self::Spop
         )
     }
 }
@@ -122,7 +144,8 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
     }
     use Command::*;
     Some(match kind {
-        Sadd | Srem | Sismember | Smismember | Smembers | Scard | Sunion | Sinter | Sdiff => {
+        Sadd | Srem | Sismember | Smismember | Smembers | Scard | Sunion | Sinter | Sdiff
+        | Sunionstore | Sinterstore | Sdiffstore | Smove | Spop | Srandmember => {
             execute_set(kind, command, store)
         }
         _ => execute_hash(kind, command, store),
@@ -248,15 +271,28 @@ fn set_array(set: &HashSet<Vec<u8>>) -> Vec<u8> {
     protocol::array(&members)
 }
 
+fn random_members(set: &HashSet<Vec<u8>>, count: usize) -> Vec<Vec<u8>> {
+    let random = RandomState::new();
+    let mut members: Vec<_> = set.iter().cloned().collect();
+    members.sort_unstable_by_key(|member| random.hash_one(member));
+    members.truncate(count.min(members.len()));
+    members
+}
+
 fn execute_set(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
     use Command::*;
     let mut entries = store.entries.lock().unwrap();
-    if matches!(kind, Sunion | Sinter | Sdiff) {
-        for key in &command[1..] {
+    if matches!(
+        kind,
+        Sunion | Sinter | Sdiff | Sunionstore | Sinterstore | Sdiffstore
+    ) {
+        let stored = matches!(kind, Sunionstore | Sinterstore | Sdiffstore);
+        let source_keys = if stored { &command[2..] } else { &command[1..] };
+        for key in source_keys {
             remove_expired(&mut entries, key);
         }
         let mut sets = Vec::new();
-        for key in &command[1..] {
+        for key in source_keys {
             match entries.get(key).map(|entry| &entry.value) {
                 Some(Value::Set(set)) => sets.push(Some(set)),
                 Some(_) => return wrong_type(),
@@ -266,17 +302,86 @@ fn execute_set(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
         let mut result = sets[0].cloned().unwrap_or_default();
         for set in &sets[1..] {
             match kind {
-                Sunion => {
+                Sunion | Sunionstore => {
                     if let Some(set) = set {
                         result.extend(set.iter().cloned());
                     }
                 }
-                Sinter => result.retain(|member| set.is_some_and(|set| set.contains(member))),
-                Sdiff => result.retain(|member| !set.is_some_and(|set| set.contains(member))),
+                Sinter | Sinterstore => {
+                    result.retain(|member| set.is_some_and(|set| set.contains(member)))
+                }
+                Sdiff | Sdiffstore => {
+                    result.retain(|member| !set.is_some_and(|set| set.contains(member)))
+                }
                 _ => unreachable!(),
             }
         }
-        return set_array(&result);
+        if !stored {
+            return set_array(&result);
+        }
+        let destination = &command[1];
+        let count = result.len();
+        let previous = if count == 0 {
+            entries.remove(destination)
+        } else {
+            entries.insert(
+                destination.clone(),
+                Entry {
+                    value: Value::Set(result),
+                    expires_at: None,
+                },
+            )
+        };
+        if previous.is_some() || count != 0 {
+            mark_modified(store, destination);
+        }
+        return integer(count as i64);
+    }
+    if matches!(kind, Smove) {
+        let source = &command[1];
+        let destination = &command[2];
+        let member = &command[3];
+        remove_expired(&mut entries, source);
+        remove_expired(&mut entries, destination);
+        let source_set = match entries.get(source).map(|entry| &entry.value) {
+            Some(Value::Set(set)) => set,
+            Some(_) => return wrong_type(),
+            None => return integer(0),
+        };
+        if !source_set.contains(member) {
+            return integer(0);
+        }
+        if source == destination {
+            return integer(1);
+        }
+        if entries
+            .get(destination)
+            .is_some_and(|entry| !matches!(entry.value, Value::Set(_)))
+        {
+            return wrong_type();
+        }
+        let Some(Entry {
+            value: Value::Set(source_set),
+            ..
+        }) = entries.get_mut(source)
+        else {
+            unreachable!()
+        };
+        source_set.remove(member);
+        if source_set.is_empty() {
+            entries.remove(source);
+        }
+        let entry = entries.entry(destination.clone()).or_insert_with(|| Entry {
+            value: Value::Set(HashSet::new()),
+            expires_at: None,
+        });
+        let Value::Set(destination_set) = &mut entry.value else {
+            unreachable!()
+        };
+        destination_set.insert(member.clone());
+        mark_modified(store, source);
+        mark_modified(store, destination);
+        return integer(1);
     }
     let key = &command[1];
     remove_expired(&mut entries, key);
@@ -334,6 +439,60 @@ fn execute_set(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
                 mark_modified(store, key);
             }
             integer(removed)
+        }
+        Spop | Srandmember => {
+            let requested = if command.len() == 3 {
+                match signed_integer(&command[2]) {
+                    Some(value) if matches!(kind, Srandmember) || value >= 0 => value,
+                    _ => return protocol::error("value is not an integer or out of range"),
+                }
+            } else {
+                1
+            };
+            if requested.unsigned_abs() > 1_000_000 {
+                return protocol::error("count exceeds ReRu limit");
+            }
+            let Some(set) = set else {
+                return if command.len() == 3 {
+                    protocol::array(&[])
+                } else {
+                    b"$-1\r\n".to_vec()
+                };
+            };
+            let selected = random_members(set, requested.unsigned_abs() as usize);
+            let selected = if requested < 0 && !selected.is_empty() {
+                let random = RandomState::new();
+                (0..requested.unsigned_abs() as usize)
+                    .map(|index| {
+                        selected[(random.hash_one(index) as usize) % selected.len()].clone()
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                selected
+            };
+            if matches!(kind, Spop) && !selected.is_empty() {
+                let Some(Entry {
+                    value: Value::Set(set),
+                    ..
+                }) = entries.get_mut(key)
+                else {
+                    unreachable!()
+                };
+                for member in &selected {
+                    set.remove(member);
+                }
+                if set.is_empty() {
+                    entries.remove(key);
+                }
+                mark_modified(store, key);
+            }
+            if command.len() == 3 {
+                protocol::array(&selected)
+            } else {
+                selected
+                    .first()
+                    .map_or_else(|| b"$-1\r\n".to_vec(), |member| protocol::bulk(member))
+            }
         }
         _ => unreachable!(),
     }
