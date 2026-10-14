@@ -15,14 +15,14 @@ tests; it does not certify complete compatibility with Redis.
 | Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SUNION`, `SINTER`, `SDIFF` | Binary members, deduplication, membership, cardinality and read-only set algebra |
 | Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZCOUNT`, `ZREM` | Score-ordered members, rank/index ranges, ZADD NX/XX/GT/LT/CH/INCR |
 | Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT |
-| Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `PERSIST` | Multiple keys, rename/copy with TTL, relative/absolute expiry conditions |
+| Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `KEYS`, `SCAN`, `RANDOMKEY`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST` | Multiple keys, glob and type filtered scanning, rename/copy with TTL, relative/absolute expiry conditions |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB` | Binary channels/messages, glob patterns, RESP2 subscribed mode, CHANNELS/NUMSUB/NUMPAT; local process only |
 | Connection close | `QUIT` | Replies OK and closes the connection |
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 | Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
 
-Total: **88 public command names**. Supporting a command name does not mean that
+Total: **93 public command names**. Supporting a command name does not mean that
 every Redis option for that command is implemented.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
@@ -67,6 +67,11 @@ saved to a config file.
 `UNLINK` removes keys immediately but frees memory synchronously, unlike
 Redis's background reclamation. `DBSIZE` counts unexpired keys without an
 active expiry sweep. `TOUCH` updates the in-memory access order and frequency.
+`KEYS` and `SCAN` exclude expired keys. `SCAN` uses a sorted index offset as
+its cursor, applies `MATCH` and `TYPE` after selecting each page, and treats
+`COUNT` as a page-size hint. It rebuilds and sorts the live key list on every
+call, so large keyspaces need a more scalable cursor implementation. Changes
+to the keyspace during a scan can shift the index and repeat or skip keys.
 
 Sorted sets keep a member lookup map and a score-ordered index. Score changes
 update both indexes. Rank lookup is still linear in the number of members;
@@ -114,7 +119,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **107 tests**: 9 unit tests and 98 server integration tests.
+The local suite has **109 tests**: 9 unit tests and 100 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,

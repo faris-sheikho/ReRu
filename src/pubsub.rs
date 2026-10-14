@@ -280,7 +280,7 @@ fn message_reply(kind: &[u8], items: &[&[u8]]) -> Vec<u8> {
     reply
 }
 
-fn glob_matches(pattern: &[u8], value: &[u8]) -> bool {
+pub(crate) fn glob_matches(pattern: &[u8], value: &[u8]) -> bool {
     let mut current = vec![false; value.len() + 1];
     current[0] = true;
     let mut index = 0;

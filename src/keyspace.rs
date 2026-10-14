@@ -1,4 +1,6 @@
-use crate::{mark_modified, protocol, remove_expired, Store};
+use crate::{mark_modified, protocol, pubsub::glob_matches, remove_expired, Store, Value};
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
@@ -11,13 +13,25 @@ pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
         Some(command.len() >= 2)
     } else if name.eq_ignore_ascii_case(b"DBSIZE") {
         Some(command.len() == 1)
+    } else if name.eq_ignore_ascii_case(b"KEYS") {
+        Some(command.len() == 2)
+    } else if name.eq_ignore_ascii_case(b"RANDOMKEY") {
+        Some(command.len() == 1)
+    } else if name.eq_ignore_ascii_case(b"SCAN") {
+        Some(command.len() >= 2 && command.len().is_multiple_of(2))
     } else if name.eq_ignore_ascii_case(b"RENAME") || name.eq_ignore_ascii_case(b"RENAMENX") {
         Some(command.len() == 3)
     } else if name.eq_ignore_ascii_case(b"COPY") {
         Some(command.len() == 3 || command.len() == 4)
-    } else if [b"TTL".as_slice(), b"PTTL", b"PERSIST"]
-        .iter()
-        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    } else if [
+        b"TTL".as_slice(),
+        b"PTTL",
+        b"EXPIRETIME",
+        b"PEXPIRETIME",
+        b"PERSIST",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate))
     {
         Some(command.len() == 2)
     } else if [b"EXPIRE".as_slice(), b"PEXPIRE", b"EXPIREAT", b"PEXPIREAT"]
@@ -28,6 +42,73 @@ pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
     } else {
         None
     }
+}
+
+fn kind(value: &Value) -> &'static [u8] {
+    match value {
+        Value::String(_) => b"string",
+        Value::List(_) => b"list",
+        Value::Stream(_) => b"stream",
+        Value::Hash(_) => b"hash",
+        Value::Set(_) => b"set",
+        Value::SortedSet(_) => b"zset",
+    }
+}
+
+fn scan(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
+    let cursor = match std::str::from_utf8(&command[1])
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        Some(value) => value,
+        None => return protocol::error("invalid cursor"),
+    };
+    let mut pattern = None;
+    let mut count = 10usize;
+    let mut value_type = None;
+    for pair in command[2..].as_chunks::<2>().0 {
+        if pair[0].eq_ignore_ascii_case(b"MATCH") {
+            pattern = Some(pair[1].as_slice());
+        } else if pair[0].eq_ignore_ascii_case(b"COUNT") {
+            count = match std::str::from_utf8(&pair[1])
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+            {
+                Some(value) => value,
+                None => return protocol::error("value is not an integer or out of range"),
+            };
+        } else if pair[0].eq_ignore_ascii_case(b"TYPE") {
+            value_type = Some(pair[1].as_slice());
+        } else {
+            return protocol::error("syntax error");
+        }
+    }
+    let now = Instant::now();
+    let entries = store.entries.lock().unwrap();
+    let mut keys: Vec<_> = entries
+        .iter()
+        .filter(|(_, entry)| entry.expires_at.is_none_or(|deadline| deadline > now))
+        .map(|(key, _)| key.clone())
+        .collect();
+    keys.sort();
+    let start = cursor.min(keys.len());
+    let end = start.saturating_add(count).min(keys.len());
+    let page: Vec<_> = keys[start..end]
+        .iter()
+        .filter(|key| {
+            pattern.is_none_or(|pattern| glob_matches(pattern, key))
+                && value_type.is_none_or(|value_type| {
+                    kind(&entries.get(*key).unwrap().value).eq_ignore_ascii_case(value_type)
+                })
+        })
+        .cloned()
+        .collect();
+    let next = if end == keys.len() { 0 } else { end };
+    let mut reply = b"*2\r\n".to_vec();
+    reply.extend(protocol::bulk(next.to_string().as_bytes()));
+    reply.extend(protocol::array(&page));
+    reply
 }
 
 #[derive(Default)]
@@ -119,6 +200,34 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
             .count();
         return Some(format!(":{count}\r\n").into_bytes());
     }
+    if name.eq_ignore_ascii_case(b"KEYS") {
+        let entries = store.entries.lock().unwrap();
+        let now = Instant::now();
+        let mut keys: Vec<_> = entries
+            .iter()
+            .filter(|(key, entry)| {
+                entry.expires_at.is_none_or(|deadline| deadline > now)
+                    && glob_matches(&command[1], key)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        keys.sort();
+        return Some(protocol::array(&keys));
+    }
+    if name.eq_ignore_ascii_case(b"SCAN") {
+        return Some(scan(command, store));
+    }
+    if name.eq_ignore_ascii_case(b"RANDOMKEY") {
+        let random = RandomState::new();
+        let now = Instant::now();
+        let entries = store.entries.lock().unwrap();
+        let key = entries
+            .iter()
+            .filter(|(_, entry)| entry.expires_at.is_none_or(|deadline| deadline > now))
+            .min_by_key(|(key, _)| random.hash_one(key))
+            .map(|(key, _)| key);
+        return Some(key.map_or_else(|| b"$-1\r\n".to_vec(), |key| protocol::bulk(key)));
+    }
     if name.eq_ignore_ascii_case(b"DEL")
         || name.eq_ignore_ascii_case(b"UNLINK")
         || name.eq_ignore_ascii_case(b"EXISTS")
@@ -187,7 +296,10 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
         store.changed.notify_all();
         return Some(b":1\r\n".to_vec());
     }
-    if name.eq_ignore_ascii_case(b"TTL") || name.eq_ignore_ascii_case(b"PTTL") {
+    if [b"TTL".as_slice(), b"PTTL", b"EXPIRETIME", b"PEXPIRETIME"]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    {
         let mut entries = store.entries.lock().unwrap();
         remove_expired(&mut entries, &command[1]);
         let value = match entries.get(&command[1]) {
@@ -198,7 +310,22 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
                     let milliseconds = deadline
                         .saturating_duration_since(Instant::now())
                         .as_millis();
-                    if name.eq_ignore_ascii_case(b"PTTL") {
+                    if name.eq_ignore_ascii_case(b"EXPIRETIME")
+                        || name.eq_ignore_ascii_case(b"PEXPIRETIME")
+                    {
+                        let absolute = SystemTime::now()
+                            .checked_add(deadline.saturating_duration_since(Instant::now()));
+                        let absolute = absolute
+                            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                            .and_then(|duration| i64::try_from(duration.as_millis()).ok());
+                        match absolute {
+                            Some(milliseconds) if name.eq_ignore_ascii_case(b"PEXPIRETIME") => {
+                                milliseconds
+                            }
+                            Some(milliseconds) => milliseconds / 1000,
+                            None => return Some(protocol::error("expire time out of range")),
+                        }
+                    } else if name.eq_ignore_ascii_case(b"PTTL") {
                         milliseconds as i64
                     } else {
                         ((milliseconds + 500) / 1000) as i64

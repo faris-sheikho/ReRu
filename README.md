@@ -44,6 +44,7 @@ count. These memory figures are not the process's actual RAM use.
 - `CONFIG GET/SET` for `maxmemory` and `maxmemory-policy`
 - `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, and `PERSIST`
 - `COPY`, `RENAME`, `RENAMENX`, `UNLINK`, `TOUCH`, and `DBSIZE`
+- `KEYS`, `SCAN`, `RANDOMKEY`, `EXPIRETIME`, and `PEXPIRETIME` for keyspace discovery
 - `MULTI`, `EXEC`, `DISCARD`, `WATCH`, and `UNWATCH`, including optimistic locking
   on primary and replica connections
 - Pub/Sub: `PUBLISH`, channel and pattern subscriptions, unsubscribe, and basic
@@ -51,7 +52,7 @@ count. These memory figures are not the process's actual RAM use.
 - Optional append-only persistence with restart and partial-tail recovery;
   `EXPIREAT` and `PEXPIREAT` for absolute key expiry
 
-88 public command names are supported, with limitations documented in the
+93 public command names are supported, with limitations documented in the
 [compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 
