@@ -30,7 +30,7 @@ impl Client {
         self.read()
     }
 
-    fn read(&mut self) -> Reply {
+    pub fn read(&mut self) -> Reply {
         let mut line = Vec::new();
         self.0.read_until(b'\n', &mut line).unwrap();
         assert!(line.ends_with(b"\r\n"), "invalid response: {line:?}");

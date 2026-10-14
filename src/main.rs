@@ -5,6 +5,7 @@ mod eviction;
 mod keyspace;
 mod persistence;
 mod protocol;
+mod pubsub;
 mod replication;
 mod sorted_sets;
 mod streams;
@@ -44,6 +45,7 @@ struct SharedStore {
     pending_keys: Mutex<HashSet<Vec<u8>>>,
     staged_keys: Mutex<Option<HashSet<Vec<u8>>>>,
     eviction: eviction::Eviction,
+    pubsub: pubsub::Hub,
 }
 
 #[derive(Default)]
@@ -542,6 +544,8 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
         eviction::info(command, store)
     } else if command[0].eq_ignore_ascii_case(b"CONFIG") {
         eviction::execute_config(command, store)
+    } else if let Some(response) = pubsub::execute(command, &store.pubsub) {
+        response
     } else if let Some(response) = cache::execute(command, store) {
         response
     } else if let Some(response) = bitmaps::execute(command, store) {
@@ -955,6 +959,8 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     let arity = command.len();
     let valid = if let Some(valid) = eviction::valid_arity(command) {
         valid
+    } else if let Some(valid) = pubsub::valid_arity(command) {
+        valid
     } else if let Some(valid) = cache::valid_arity(command) {
         valid
     } else if let Some(valid) = bitmaps::valid_arity(command) {
@@ -1007,6 +1013,10 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
 
 fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    let subscription = store
+        .pubsub
+        .connect(Arc::new(Mutex::new(stream.try_clone()?)));
     let mut transaction: Option<Vec<Vec<Vec<u8>>>> = None;
     let mut transaction_error = false;
     let mut watches = ClientWatches::new(Arc::clone(&store));
@@ -1019,6 +1029,48 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 continue;
             }
             return serve_replica(stream, &store);
+        }
+        if command[0].eq_ignore_ascii_case(b"QUIT") {
+            if command.len() != 1 {
+                subscription.write(&protocol::error(
+                    "wrong number of arguments for 'quit' command",
+                ))?;
+                continue;
+            }
+            subscription.write(b"+OK\r\n")?;
+            return Ok(());
+        }
+        if pubsub::is_subscription_command(&command) {
+            if transaction.is_some() {
+                transaction_error = true;
+                subscription.write(&protocol::error(
+                    "Pub/Sub command inside MULTI is not allowed",
+                ))?;
+            } else {
+                let _gate = store.command_gate.lock().unwrap();
+                subscription.change(&command)?;
+            }
+            continue;
+        }
+        if subscription.active() {
+            if command[0].eq_ignore_ascii_case(b"PING") {
+                let reply = if command.len() > 2 {
+                    protocol::error("wrong number of arguments for 'ping' command")
+                } else {
+                    let payload = command.get(1).map_or(b"".as_slice(), Vec::as_slice);
+                    let mut reply = b"*2\r\n".to_vec();
+                    reply.extend(protocol::bulk(b"pong"));
+                    reply.extend(protocol::bulk(payload));
+                    reply
+                };
+                let _gate = store.command_gate.lock().unwrap();
+                subscription.write(&reply)?;
+            } else {
+                subscription.write(&protocol::error(
+                    "Can't execute command while subscribed; only (P|S)SUBSCRIBE, (P|S)UNSUBSCRIBE, PING and QUIT are allowed",
+                ))?;
+            }
+            continue;
         }
         let response = if store.read_only && is_mutating(&command) {
             if transaction.is_some() {
@@ -1121,7 +1173,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             }
             response
         };
-        stream.write_all(&response)?;
+        subscription.write(&response)?;
     }
     Ok(())
 }
@@ -1198,6 +1250,7 @@ fn main() -> io::Result<()> {
         pending_keys: Mutex::new(HashSet::new()),
         staged_keys: Mutex::new(None),
         eviction: eviction::Eviction::new(maxmemory, maxmemory_policy),
+        pubsub: pubsub::Hub::default(),
     });
     if !store.read_only {
         store.eviction.evict(&store);

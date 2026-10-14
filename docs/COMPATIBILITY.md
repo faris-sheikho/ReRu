@@ -17,10 +17,12 @@ tests; it does not certify complete compatibility with Redis.
 | Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT |
 | Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Multiple keys, rename/copy with TTL, expiry conditions |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
+| Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB` | Binary channels/messages, glob patterns, RESP2 subscribed mode, CHANNELS/NUMSUB/NUMPAT; local process only |
+| Connection close | `QUIT` | Replies OK and closes the connection |
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 | Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
 
-Total: **79 public command names**. Supporting a command name does not mean that
+Total: **86 public command names**. Supporting a command name does not mean that
 every Redis option for that command is implemented.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
@@ -89,9 +91,22 @@ Strings and bitmaps share the same underlying value type.
 - Persistence errors do not roll back the in-memory command. Crash durability,
   fsync policies and disk failure recovery need further work.
 
+## Pub/Sub
+
+Messages are delivered to current subscribers on the same server process.
+Pattern subscriptions use byte-wise, case-sensitive `*`, `?`, bracket ranges,
+and backslash escapes. A direct and matching pattern subscription on one client
+receive separate messages, and `PUBLISH` counts both. Subscribed RESP2 clients
+can issue subscription commands, PING and QUIT. Disconnects remove their
+subscriptions. Delivery is at-most-once; messages are not persisted or
+replicated, and clients on other ReRu servers do not receive them. Writes to a
+subscriber socket are synchronous with a 500 ms timeout; slow-client buffering
+and backpressure do not yet match Redis. RESET, sharded Pub/Sub, keyspace
+notifications, and Pub/Sub ACLs remain pending.
+
 ## Verification for this increment
 
-The local suite has **98 tests**: 7 unit tests and 91 server integration tests.
+The local suite has **102 tests**: 8 unit tests and 94 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, replica updates, and malformed snapshot payloads. Earlier keyspace,

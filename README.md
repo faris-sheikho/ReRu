@@ -42,8 +42,10 @@ count. These memory figures are not the process's actual RAM use.
 - `COPY`, `RENAME`, `RENAMENX`, `UNLINK`, `TOUCH`, and `DBSIZE`
 - `MULTI`, `EXEC`, `DISCARD`, `WATCH`, and `UNWATCH`, including optimistic locking
   on primary and replica connections
+- Pub/Sub: `PUBLISH`, channel and pattern subscriptions, unsubscribe, and basic
+  `PUBSUB` introspection; `QUIT` closes a client connection
 
-79 public command names are supported, with limitations documented in the
+86 public command names are supported, with limitations documented in the
 [compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 

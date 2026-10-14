@@ -6,7 +6,7 @@ optimistic locking, initial keyspace commands, core hashes and sets, initial
 sorted sets and bitmaps, common cache-oriented string commands, and optional
 logical-memory bounds with ten eviction policies, runtime memory configuration,
 partial INFO memory/stats, and more keyspace commands are implemented. Optional
-ReRu snapshots and ReRu-to-ReRu replication are tested. See the
+ReRu snapshots, ReRu-to-ReRu replication, and basic local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
 Redis 8.10.2 is the pinned compatibility reference. The current Rust code uses
 upstream documentation for behavior; a direct source-translation license has
@@ -27,7 +27,7 @@ not been selected.
 2. Expand sorted sets and bitmaps, add geospatial indexes; extend hashes and
    sets with scans, field expiry, random access, moves, and storing set algebra
    results.
-3. Expand transaction compatibility testing, then add pub/sub, scripting, and
+3. Expand transaction compatibility testing, Pub/Sub coverage, scripting, and
    the remaining keyspace commands.
 4. Add Redis-compatible RDB and AOF persistence with restart and recovery tests.
 5. Add Redis PSYNC replication, failover, clustering, authentication, and
