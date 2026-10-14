@@ -6,7 +6,8 @@ optimistic locking, initial keyspace commands, core hashes and sets, initial
 sorted sets and bitmaps, common cache-oriented string commands, and optional
 logical-memory bounds with ten eviction policies, runtime memory configuration,
 partial INFO memory/stats, and more keyspace commands are implemented. Optional
-ReRu snapshots, ReRu-to-ReRu replication, and basic local Pub/Sub are tested. See the
+ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
+local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
 Redis 8.10.2 is the pinned compatibility reference. The current Rust code uses
 upstream documentation for behavior; a direct source-translation license has
@@ -29,7 +30,8 @@ not been selected.
    results.
 3. Expand transaction compatibility testing, Pub/Sub coverage, scripting, and
    the remaining keyspace commands.
-4. Add Redis-compatible RDB and AOF persistence with restart and recovery tests.
+4. Add Redis-compatible RDB and full AOF persistence with rewrite, restart,
+   configuration, and recovery tests.
 5. Add Redis PSYNC replication, failover, clustering, authentication, and
    configuration.
 6. Bring maxmemory accounting and eviction internals closer to Redis, then add RESP3, performance and resource controls, operational tooling, and
@@ -38,7 +40,9 @@ not been selected.
 ## Current limits
 
 - By default data is held only in memory. `--snapshot FILE` saves after each
-  write using a ReRu-specific format; it is not Redis RDB or AOF.
+  write using a ReRu-specific format; it is not Redis RDB. `--appendonly FILE`
+  offers single-file RESP command batches with fsync per batch; it lacks Redis
+  multipart AOF and rewrite behavior and cannot be combined with snapshots or replicas.
 - Replicas use full snapshot transfer on each write and resynchronize after a
   disconnect. They do not support Redis PSYNC, offsets, or backlog recovery.
   Custom replication frames carry changed-key metadata for replica `WATCH`;

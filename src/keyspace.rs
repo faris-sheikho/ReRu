@@ -20,7 +20,10 @@ pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
     {
         Some(command.len() == 2)
-    } else if name.eq_ignore_ascii_case(b"EXPIRE") || name.eq_ignore_ascii_case(b"PEXPIRE") {
+    } else if [b"EXPIRE".as_slice(), b"PEXPIRE", b"EXPIREAT", b"PEXPIREAT"]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    {
         Some(command.len() >= 3)
     } else {
         None
@@ -75,7 +78,9 @@ fn expiry_arguments(command: &[Vec<u8>]) -> Result<(i64, ExpiryConditions), Vec<
             String::from_utf8_lossy(&command[0]).to_ascii_lowercase()
         ))
     };
-    let milliseconds = if command[0].eq_ignore_ascii_case(b"EXPIRE") {
+    let milliseconds = if command[0].eq_ignore_ascii_case(b"EXPIRE")
+        || command[0].eq_ignore_ascii_case(b"EXPIREAT")
+    {
         number.checked_mul(1000).ok_or_else(invalid_expiry)?
     } else {
         number
@@ -85,10 +90,15 @@ fn expiry_arguments(command: &[Vec<u8>]) -> Result<(i64, ExpiryConditions), Vec<
         .ok()
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
         .ok_or_else(invalid_expiry)?;
-    epoch_ms
-        .checked_add(milliseconds)
-        .ok_or_else(invalid_expiry)?;
-    Ok((milliseconds, conditions))
+    if command[0].eq_ignore_ascii_case(b"EXPIREAT") || command[0].eq_ignore_ascii_case(b"PEXPIREAT")
+    {
+        Ok((milliseconds.saturating_sub(epoch_ms), conditions))
+    } else {
+        epoch_ms
+            .checked_add(milliseconds)
+            .ok_or_else(invalid_expiry)?;
+        Ok((milliseconds, conditions))
+    }
 }
 
 pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {

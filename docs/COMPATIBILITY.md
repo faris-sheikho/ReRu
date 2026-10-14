@@ -15,14 +15,14 @@ tests; it does not certify complete compatibility with Redis.
 | Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SUNION`, `SINTER`, `SDIFF` | Binary members, deduplication, membership, cardinality and read-only set algebra |
 | Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZCOUNT`, `ZREM` | Score-ordered members, rank/index ranges, ZADD NX/XX/GT/LT/CH/INCR |
 | Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT |
-| Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Multiple keys, rename/copy with TTL, expiry conditions |
+| Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `PERSIST` | Multiple keys, rename/copy with TTL, relative/absolute expiry conditions |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB` | Binary channels/messages, glob patterns, RESP2 subscribed mode, CHANNELS/NUMSUB/NUMPAT; local process only |
 | Connection close | `QUIT` | Replies OK and closes the connection |
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 | Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
 
-Total: **86 public command names**. Supporting a command name does not mean that
+Total: **88 public command names**. Supporting a command name does not mean that
 every Redis option for that command is implemented.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
@@ -83,13 +83,21 @@ Strings and bitmaps share the same underlying value type.
   included. This is the custom `RERUSNP1` format, not Redis RDB or AOF.
   New builds can load earlier snapshots. Older builds cannot load snapshots
   containing newer value types; use matching builds for these types.
+- Optional `--appendonly FILE` writes the resulting state of changed keys as
+  RESP2 `MULTI`/`EXEC` command batches and replays complete batches at startup.
+  It preserves binary data, types, and absolute expiry across restarts, and
+  truncates an incomplete final batch. Each batch is synced to disk before the
+  command response. This is a simple single-file AOF subset; it does not
+  implement Redis 7 multipart AOF manifests, background rewrite, configurable
+  fsync policy, or arbitrary external AOF import. It cannot be combined with
+  `--snapshot` or `--replicaof` yet. Files can grow without bound.
 - Optional `--replicaof HOST PORT` provides read-only ReRu replicas, initial
   synchronization, subsequent full dataset snapshots and reconnection.
 - Replication uses custom `RERUREP1` frames with changed-key metadata. Use matching
   builds on both ends. Redis PSYNC, partial resynchronization, acknowledgments,
   WAIT and failover are not implemented.
-- Persistence errors do not roll back the in-memory command. Crash durability,
-  fsync policies and disk failure recovery need further work.
+- Persistence errors do not roll back the in-memory command. Disk failure
+  recovery and configurable durability policy need further work.
 
 ## Pub/Sub
 
@@ -106,10 +114,10 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **102 tests**: 8 unit tests and 94 server integration tests.
+The local suite has **107 tests**: 9 unit tests and 98 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
-restart, replica updates, and malformed snapshot payloads. Earlier keyspace,
+restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,
 list, stream, hash, set, and transaction regression tests remain. Eviction tests
 cover OOM rollback, WATCH, transactions, policy selection, INFO counters,
 access order, runtime configuration, and snapshot restart. Keyspace tests cover rename/copy TTL, noeviction rollback,

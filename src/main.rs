@@ -1,3 +1,4 @@
+mod aof;
 mod bitmaps;
 mod cache;
 mod collections;
@@ -39,6 +40,7 @@ struct SharedStore {
     changed: Condvar,
     command_gate: Mutex<()>,
     snapshot_path: Option<PathBuf>,
+    aof_path: Option<PathBuf>,
     replicas: Mutex<Vec<SyncSender<Vec<u8>>>>,
     read_only: bool,
     watched_keys: Mutex<HashMap<Vec<u8>, WatchRegistration>>,
@@ -174,6 +176,8 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             b"COPY",
             b"EXPIRE",
             b"PEXPIRE",
+            b"EXPIREAT",
+            b"PEXPIREAT",
             b"PERSIST",
         ]
         .iter()
@@ -203,9 +207,15 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
     {
         return;
     }
-    if [b"EXPIRE".as_slice(), b"PEXPIRE", b"PERSIST"]
-        .iter()
-        .any(|name| command[0].eq_ignore_ascii_case(name))
+    if [
+        b"EXPIRE".as_slice(),
+        b"PEXPIRE",
+        b"EXPIREAT",
+        b"PEXPIREAT",
+        b"PERSIST",
+    ]
+    .iter()
+    .any(|name| command[0].eq_ignore_ascii_case(name))
         && response != b":1\r\n"
     {
         return;
@@ -270,20 +280,34 @@ fn save_and_publish(store: &Store) -> io::Result<()> {
     if changed_keys.is_empty() {
         return Ok(());
     }
-    if store.snapshot_path.is_none() && store.replicas.lock().unwrap().is_empty() {
+    if store.snapshot_path.is_none()
+        && store.aof_path.is_none()
+        && store.replicas.lock().unwrap().is_empty()
+    {
         return Ok(());
     }
-    let bytes = persistence::encode(&store.entries.lock().unwrap())?;
-    if let Some(path) = &store.snapshot_path {
-        persistence::save(path, &bytes)?;
+    let result = (|| {
+        if let Some(path) = &store.aof_path {
+            aof::append(path, &changed_keys, &store.entries.lock().unwrap())?;
+        }
+        if store.snapshot_path.is_some() || !store.replicas.lock().unwrap().is_empty() {
+            let bytes = persistence::encode(&store.entries.lock().unwrap())?;
+            if let Some(path) = &store.snapshot_path {
+                persistence::save(path, &bytes)?;
+            }
+            let update = replication::encode(&bytes, Some(&changed_keys))?;
+            store
+                .replicas
+                .lock()
+                .unwrap()
+                .retain(|sender| sender.try_send(update.clone()).is_ok());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        store.pending_keys.lock().unwrap().extend(changed_keys);
     }
-    let update = replication::encode(&bytes, Some(&changed_keys))?;
-    store
-        .replicas
-        .lock()
-        .unwrap()
-        .retain(|sender| sender.try_send(update.clone()).is_ok());
-    Ok(())
+    result
 }
 
 fn write_snapshot_frame(stream: &mut TcpStream, snapshot: &[u8]) -> io::Result<()> {
@@ -1182,6 +1206,7 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mut port = 6379;
     let mut snapshot_path = None;
+    let mut aof_path = None;
     let mut replica_of = None;
     let mut maxmemory = 0;
     let mut maxmemory_policy = eviction::Policy::NoEviction;
@@ -1190,7 +1215,7 @@ fn main() -> io::Result<()> {
         let value = args.get(index + 1).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
+                "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
             )
         })?;
         match args[index].as_str() {
@@ -1200,6 +1225,7 @@ fn main() -> io::Result<()> {
                 })?
             }
             "--snapshot" => snapshot_path = Some(PathBuf::from(value)),
+            "--appendonly" => aof_path = Some(PathBuf::from(value)),
             "--maxmemory" => {
                 maxmemory = eviction::parse_size(value).ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "invalid --maxmemory size")
@@ -1226,11 +1252,18 @@ fn main() -> io::Result<()> {
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
+                    "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
                 ))
             }
         }
         index += 2;
+    }
+
+    if aof_path.is_some() && (snapshot_path.is_some() || replica_of.is_some()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--appendonly cannot be combined with --snapshot or --replicaof",
+        ));
     }
 
     let listener = TcpListener::bind(("127.0.0.1", port))?;
@@ -1244,6 +1277,7 @@ fn main() -> io::Result<()> {
         changed: Condvar::new(),
         command_gate: Mutex::new(()),
         snapshot_path,
+        aof_path,
         replicas: Mutex::new(Vec::new()),
         read_only: replica_of.is_some(),
         watched_keys: Mutex::new(HashMap::new()),
@@ -1252,6 +1286,9 @@ fn main() -> io::Result<()> {
         eviction: eviction::Eviction::new(maxmemory, maxmemory_policy),
         pubsub: pubsub::Hub::default(),
     });
+    if let Some(path) = &store.aof_path {
+        aof::replay(path, &store)?;
+    }
     if !store.read_only {
         store.eviction.evict(&store);
         save_and_publish(&store)?;
