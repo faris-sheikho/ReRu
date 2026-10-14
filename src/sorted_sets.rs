@@ -27,7 +27,7 @@ impl Ord for ScoredMember {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SortedSet {
     by_member: HashMap<Vec<u8>, f64>,
     ordered: BTreeSet<ScoredMember>,

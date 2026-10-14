@@ -33,6 +33,21 @@ HSET/HMSET writes invalidate watches even when values are unchanged. Hash/set
 enumeration is sorted in ReRu for stable output; clients should treat ordering
 as unspecified. HMSET is supported for older clients; prefer HSET for new code.
 
+## Memory limit and eviction
+
+`--maxmemory SIZE` accepts bytes or `k`/`kb`, `m`/`mb`, and `g`/`gb` suffixes.
+The default `0` means unlimited. `--maxmemory-policy` accepts `noeviction`
+(default) or `allkeys-lru`. ReRu estimates logical dataset bytes from keys,
+values, and fixed per-entry overhead; this is **not** Redis allocator memory,
+process RSS, or an exact RAM ceiling. LRU is exact over access timestamps kept
+in memory, whereas Redis uses a sampled approximation. An oversize write under
+`noeviction` returns OOM and rolls back the command, including its WATCH effects.
+Evictions are included in ReRu snapshots and replication. Loaded snapshots are
+trimmed to the limit under `allkeys-lru`; recency is not stored in snapshots.
+Memory accounting scans the dataset and noeviction rollback copies it, so
+bounded-memory writes need further performance work. Redis's `volatile-*`,
+LFU, random, and TTL policies, plus runtime `CONFIG SET`, remain unsupported.
+
 Sorted sets keep a member lookup map and a score-ordered index. Score changes
 update both indexes. Rank lookup is still linear in the number of members;
 range scans advance through the ordered index. `ZRANGE` supports rank indexes,
@@ -58,11 +73,12 @@ Strings and bitmaps share the same underlying value type.
 
 ## Verification for this increment
 
-The local suite has **80 tests**: 6 unit tests and 74 server integration tests.
+The local suite has **85 tests**: 7 unit tests and 78 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, replica updates, and malformed snapshot payloads. Earlier keyspace,
-list, stream, hash, set, and transaction regression tests remain. Formatting
+list, stream, hash, set, and transaction regression tests remain. Eviction tests
+cover OOM rollback, WATCH, transactions, access order, and snapshot restart. Formatting
 and Clippy are checked.
 
 These are ReRu regression tests. A differential suite against a running pinned
@@ -72,7 +88,7 @@ Redis server is still required before making a compatibility claim.
 
 Additional sorted-set and bitmap commands, geospatial commands, stream consumer groups,
 pub/sub, scripting, broader command options, Redis RDB/AOF, PSYNC, authentication,
-ACLs, RESP3, cluster/failover, maxmemory/LRU eviction, bounded resource usage and performance engineering
+ACLs, RESP3, cluster/failover, full eviction policies, bounded resource usage and performance engineering
 remain. Blocking clients do not yet receive Redis's FIFO waiter guarantees.
 Hash field expiry, HSCAN, HINCRBYFLOAT, set scans/random selection, SMOVE,
 and set algebra STORE variants are also pending.

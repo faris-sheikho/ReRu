@@ -1,6 +1,7 @@
 mod bitmaps;
 mod cache;
 mod collections;
+mod eviction;
 mod keyspace;
 mod persistence;
 mod protocol;
@@ -16,6 +17,7 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+#[derive(Clone)]
 enum Value {
     String(Vec<u8>),
     List(Vec<Vec<u8>>),
@@ -25,6 +27,7 @@ enum Value {
     SortedSet(sorted_sets::SortedSet),
 }
 
+#[derive(Clone)]
 struct Entry {
     value: Value,
     expires_at: Option<Instant>,
@@ -39,6 +42,8 @@ struct SharedStore {
     read_only: bool,
     watched_keys: Mutex<HashMap<Vec<u8>, WatchRegistration>>,
     pending_keys: Mutex<HashSet<Vec<u8>>>,
+    staged_keys: Mutex<Option<HashSet<Vec<u8>>>>,
+    eviction: eviction::Eviction,
 }
 
 #[derive(Default)]
@@ -114,6 +119,12 @@ impl Drop for ClientWatches {
 }
 
 fn mark_modified(store: &Store, key: &[u8]) {
+    let mut staged = store.staged_keys.lock().unwrap();
+    if let Some(keys) = staged.as_mut() {
+        keys.insert(key.to_vec());
+        return;
+    }
+    drop(staged);
     store.pending_keys.lock().unwrap().insert(key.to_vec());
     invalidate_watch(store, key);
 }
@@ -174,6 +185,46 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
         return;
     }
     mark_modified(store, &command[1]);
+}
+
+// The caller holds command_gate. A bounded noeviction write is staged so an OOM
+// response cannot leave partial data or invalidate WATCH registrations.
+fn execute_checked(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
+    if !is_mutating(command) || !store.eviction.enabled() {
+        let response = execute_command(command, store, allow_blocking);
+        record_write(store, command, &response);
+        return response;
+    }
+    if store.eviction.policy == eviction::Policy::AllKeysLru {
+        let response = execute_command(command, store, allow_blocking);
+        record_write(store, command, &response);
+        if !response.starts_with(b"-") {
+            store.eviction.touch(command, store);
+            store.eviction.evict(store);
+        }
+        return response;
+    }
+
+    let before = store.entries.lock().unwrap().clone();
+    let before_bytes = eviction::dataset_bytes(&before);
+    *store.staged_keys.lock().unwrap() = Some(HashSet::new());
+    let response = execute_command(command, store, allow_blocking);
+    record_write(store, command, &response);
+    let after_bytes = eviction::dataset_bytes(&store.entries.lock().unwrap());
+    let overflow = after_bytes > store.eviction.maxmemory && after_bytes > before_bytes;
+    let changed = store.staged_keys.lock().unwrap().take().unwrap();
+    if overflow || response.starts_with(b"-") {
+        *store.entries.lock().unwrap() = before;
+        return if overflow {
+            b"-OOM command not allowed when used memory > 'maxmemory'.\r\n".to_vec()
+        } else {
+            response
+        };
+    }
+    for key in changed {
+        mark_modified(store, &key);
+    }
+    response
 }
 
 fn save_and_publish(store: &Store) -> io::Result<()> {
@@ -450,6 +501,7 @@ fn xread_ids(
 }
 
 fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
+    store.eviction.touch(command, store);
     if let Some(response) = cache::execute(command, store) {
         response
     } else if let Some(response) = bitmaps::execute(command, store) {
@@ -986,8 +1038,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         let mut response = format!("*{}\r\n", queued.len()).into_bytes();
                         let writes = queued.iter().any(|command| is_mutating(command));
                         for queued_command in queued {
-                            let result = execute_command(&queued_command, &store, false);
-                            record_write(&store, &queued_command, &result);
+                            let result = execute_checked(&queued_command, &store, false);
                             response.extend(result);
                         }
                         if writes {
@@ -1022,8 +1073,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             response
         } else {
             let _gate = store.command_gate.lock().unwrap();
-            let response = execute_command(&command, &store, true);
-            record_write(&store, &command, &response);
+            let response = execute_checked(&command, &store, true);
             if is_mutating(&command) {
                 save_and_publish(&store)?;
             }
@@ -1039,12 +1089,14 @@ fn main() -> io::Result<()> {
     let mut port = 6379;
     let mut snapshot_path = None;
     let mut replica_of = None;
+    let mut maxmemory = 0;
+    let mut maxmemory_policy = eviction::Policy::NoEviction;
     let mut index = 1;
     while index < args.len() {
         let value = args.get(index + 1).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT]",
+                "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy noeviction|allkeys-lru]",
             )
         })?;
         match args[index].as_str() {
@@ -1054,6 +1106,16 @@ fn main() -> io::Result<()> {
                 })?
             }
             "--snapshot" => snapshot_path = Some(PathBuf::from(value)),
+            "--maxmemory" => {
+                maxmemory = eviction::parse_size(value).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid --maxmemory size")
+                })?
+            }
+            "--maxmemory-policy" => {
+                maxmemory_policy = eviction::Policy::parse(value).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid --maxmemory-policy")
+                })?
+            }
             "--replicaof" => {
                 let upstream_port = args
                     .get(index + 2)
@@ -1070,7 +1132,7 @@ fn main() -> io::Result<()> {
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT]",
+                    "usage: reru [--port PORT] [--snapshot FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy noeviction|allkeys-lru]",
                 ))
             }
         }
@@ -1092,7 +1154,13 @@ fn main() -> io::Result<()> {
         read_only: replica_of.is_some(),
         watched_keys: Mutex::new(HashMap::new()),
         pending_keys: Mutex::new(HashSet::new()),
+        staged_keys: Mutex::new(None),
+        eviction: eviction::Eviction::new(maxmemory, maxmemory_policy),
     });
+    if !store.read_only {
+        store.eviction.evict(&store);
+        save_and_publish(&store)?;
+    }
     if let Some(address) = replica_of {
         let replica_store = Arc::clone(&store);
         std::thread::spawn(move || follow_primary(address, replica_store));

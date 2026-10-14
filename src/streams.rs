@@ -37,13 +37,13 @@ impl StreamId {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StreamEntry {
     pub id: StreamId,
     pub fields: Vec<Vec<u8>>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Stream {
     pub entries: Vec<StreamEntry>,
 }
