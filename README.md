@@ -19,6 +19,7 @@ after writes and restores it on startup. Its file format is specific to ReRu.
 `--replicaof` starts a read-only ReRu replica that resynchronizes from the primary.
 `--maxmemory` uses a ReRu dataset-size estimate. Its policies are `noeviction`
 (default) and `allkeys-lru`; the default limit is `0` (unlimited).
+`CONFIG GET/SET` can inspect and change these two settings at runtime.
 
 ## Current support
 
@@ -32,11 +33,12 @@ after writes and restores it on startup. Its file format is specific to ReRu.
 - Sorted-set insertion, score/rank lookup, ranges, counts, and removal
 - Bitmap operations on strings: `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, and `BITPOS`
 - Optional memory limit with OOM rejection or least-recently-used key eviction
+- `CONFIG GET/SET` for `maxmemory` and `maxmemory-policy`
 - `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, and `PERSIST`
 - `MULTI`, `EXEC`, `DISCARD`, `WATCH`, and `UNWATCH`, including optimistic locking
   on primary and replica connections
 
-71 public command names are supported, with limitations documented in the
+72 public command names are supported, with limitations documented in the
 [compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 

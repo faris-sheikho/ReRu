@@ -4,7 +4,8 @@ ReRu is an incremental Rust implementation of Redis-compatible behavior. The
 first 20 CodeCrafters milestones, initial stream commands, transactions with
 optimistic locking, initial keyspace commands, core hashes and sets, initial
 sorted sets and bitmaps, common cache-oriented string commands, and optional
-logical-memory bounds with noeviction and allkeys-lru policies are
+logical-memory bounds with noeviction and allkeys-lru policies and runtime
+memory configuration are
 implemented. Optional
 ReRu snapshots and ReRu-to-ReRu replication are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
@@ -48,7 +49,7 @@ not been selected.
   limit. The optional maxmemory ceiling uses estimated logical dataset size,
   not process memory. Bitmap values have a 64 MiB growth cap.
 - Noeviction and allkeys-lru are available. Redis's other eviction policies,
-  sampled LRU behavior, and runtime memory configuration are not implemented.
+  sampled LRU behavior, and most CONFIG parameters are not implemented.
 - Blocking list operations wake waiting clients, but Redis's FIFO waiter
   ordering is not implemented yet.
 - This project is not a production Redis replacement at this stage.

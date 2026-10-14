@@ -1,4 +1,4 @@
-use crate::{mark_modified, Entry, Store, Value};
+use crate::{mark_modified, protocol, Entry, Store, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -18,6 +18,19 @@ impl Policy {
             _ => None,
         }
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NoEviction => "noeviction",
+            Self::AllKeysLru => "allkeys-lru",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Settings {
+    pub maxmemory: usize,
+    pub policy: Policy,
 }
 
 pub fn parse_size(value: &str) -> Option<usize> {
@@ -35,9 +48,93 @@ pub fn parse_size(value: &str) -> Option<usize> {
     count.checked_mul(multiplier)
 }
 
+fn matches_pattern(pattern: &[u8], value: &[u8]) -> bool {
+    let (mut pattern_at, mut value_at, mut star, mut retry) = (0, 0, None, 0);
+    while value_at < value.len() {
+        if pattern_at < pattern.len()
+            && (pattern[pattern_at] == b'?'
+                || pattern[pattern_at].eq_ignore_ascii_case(&value[value_at]))
+        {
+            pattern_at += 1;
+            value_at += 1;
+        } else if pattern_at < pattern.len() && pattern[pattern_at] == b'*' {
+            star = Some(pattern_at);
+            pattern_at += 1;
+            retry = value_at;
+        } else if let Some(position) = star {
+            retry += 1;
+            value_at = retry;
+            pattern_at = position + 1;
+        } else {
+            return false;
+        }
+    }
+    pattern[pattern_at..].iter().all(|byte| *byte == b'*')
+}
+
+pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
+    if !command[0].eq_ignore_ascii_case(b"CONFIG") {
+        return None;
+    }
+    Some(match command.get(1).map(Vec::as_slice) {
+        Some(name) if name.eq_ignore_ascii_case(b"GET") => command.len() >= 3,
+        Some(name) if name.eq_ignore_ascii_case(b"SET") => {
+            command.len() >= 4 && command.len().is_multiple_of(2)
+        }
+        _ => false,
+    })
+}
+
+pub fn execute_config(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
+    if valid_arity(command) != Some(true) {
+        return protocol::error("wrong number of arguments for 'config' command");
+    }
+    let settings = store.eviction.settings();
+    if command[1].eq_ignore_ascii_case(b"GET") {
+        let mut output = Vec::new();
+        for (name, value) in [
+            (b"maxmemory".as_slice(), settings.maxmemory.to_string()),
+            (
+                b"maxmemory-policy".as_slice(),
+                settings.policy.name().to_string(),
+            ),
+        ] {
+            if command[2..]
+                .iter()
+                .any(|pattern| matches_pattern(pattern, name))
+            {
+                output.push(name.to_vec());
+                output.push(value.into_bytes());
+            }
+        }
+        return protocol::array(&output);
+    }
+    let mut updated = settings;
+    for pair in command[2..].as_chunks::<2>().0 {
+        let value = match std::str::from_utf8(&pair[1]) {
+            Ok(value) => value,
+            Err(_) => return protocol::error("Invalid CONFIG value"),
+        };
+        if pair[0].eq_ignore_ascii_case(b"maxmemory") {
+            updated.maxmemory = match parse_size(value) {
+                Some(value) => value,
+                None => return protocol::error("Invalid maxmemory value"),
+            };
+        } else if pair[0].eq_ignore_ascii_case(b"maxmemory-policy") {
+            updated.policy = match Policy::parse(value) {
+                Some(value) => value,
+                None => return protocol::error("Invalid maxmemory-policy value"),
+            };
+        } else {
+            return protocol::error("Unsupported CONFIG parameter");
+        }
+    }
+    store.eviction.update(updated, store);
+    b"+OK\r\n".to_vec()
+}
+
 pub struct Eviction {
-    pub maxmemory: usize,
-    pub policy: Policy,
+    settings: Mutex<Settings>,
     accesses: Mutex<HashMap<Vec<u8>, u64>>,
     clock: AtomicU64,
     pub evicted_keys: AtomicU64,
@@ -46,20 +143,25 @@ pub struct Eviction {
 impl Eviction {
     pub fn new(maxmemory: usize, policy: Policy) -> Self {
         Self {
-            maxmemory,
-            policy,
+            settings: Mutex::new(Settings { maxmemory, policy }),
             accesses: Mutex::new(HashMap::new()),
             clock: AtomicU64::new(0),
             evicted_keys: AtomicU64::new(0),
         }
     }
 
-    pub fn enabled(&self) -> bool {
-        self.maxmemory != 0
+    pub fn settings(&self) -> Settings {
+        *self.settings.lock().unwrap()
+    }
+
+    pub fn update(&self, settings: Settings, store: &Store) {
+        *self.settings.lock().unwrap() = settings;
+        self.evict(store);
     }
 
     pub fn touch(&self, command: &[Vec<u8>], store: &Store) {
-        if !self.enabled() || self.policy != Policy::AllKeysLru || command.len() < 2 {
+        let settings = self.settings();
+        if settings.maxmemory == 0 || settings.policy != Policy::AllKeysLru || command.len() < 2 {
             return;
         }
         let name = &command[0];
@@ -85,7 +187,10 @@ impl Eviction {
                 .unwrap_or_default()
         } else if name.eq_ignore_ascii_case(b"BLPOP") {
             command[1..command.len() - 1].iter().collect()
-        } else if name.eq_ignore_ascii_case(b"PING") || name.eq_ignore_ascii_case(b"ECHO") {
+        } else if name.eq_ignore_ascii_case(b"PING")
+            || name.eq_ignore_ascii_case(b"ECHO")
+            || name.eq_ignore_ascii_case(b"CONFIG")
+        {
             Vec::new()
         } else {
             vec![&command[1]]
@@ -100,13 +205,14 @@ impl Eviction {
     }
 
     pub fn evict(&self, store: &Store) {
-        if !self.enabled() || self.policy != Policy::AllKeysLru {
+        let settings = self.settings();
+        if settings.maxmemory == 0 || settings.policy != Policy::AllKeysLru {
             return;
         }
         let mut entries = store.entries.lock().unwrap();
         let mut accesses = self.accesses.lock().unwrap();
         let mut used = dataset_bytes(&entries);
-        while used > self.maxmemory {
+        while used > settings.maxmemory {
             let Some(key) = entries
                 .iter()
                 .filter(|(_, entry)| entry.expires_at.is_none_or(|at| at > Instant::now()))

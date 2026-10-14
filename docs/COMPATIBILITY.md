@@ -17,8 +17,9 @@ tests; it does not certify complete compatibility with Redis.
 | Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT |
 | Keyspace | `TYPE`, `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `PERSIST` | Multiple deletion/existence keys; expiry across current data types; NX/XX/GT/LT expiry conditions |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
+| Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 
-Total: **71 public command names**. Supporting a command name does not mean that
+Total: **72 public command names**. Supporting a command name does not mean that
 every Redis option for that command is implemented.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
@@ -45,8 +46,9 @@ in memory, whereas Redis uses a sampled approximation. An oversize write under
 Evictions are included in ReRu snapshots and replication. Loaded snapshots are
 trimmed to the limit under `allkeys-lru`; recency is not stored in snapshots.
 Memory accounting scans the dataset and noeviction rollback copies it, so
-bounded-memory writes need further performance work. Redis's `volatile-*`,
-LFU, random, and TTL policies, plus runtime `CONFIG SET`, remain unsupported.
+bounded-memory writes need further performance work. `CONFIG GET/SET` supports
+only the two memory settings; runtime changes are not saved to a config file.
+Redis's `volatile-*`, LFU, random, and TTL policies remain unsupported.
 
 Sorted sets keep a member lookup map and a score-ordered index. Score changes
 update both indexes. Rank lookup is still linear in the number of members;
@@ -73,12 +75,13 @@ Strings and bitmaps share the same underlying value type.
 
 ## Verification for this increment
 
-The local suite has **85 tests**: 7 unit tests and 78 server integration tests.
+The local suite has **86 tests**: 7 unit tests and 79 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, replica updates, and malformed snapshot payloads. Earlier keyspace,
 list, stream, hash, set, and transaction regression tests remain. Eviction tests
-cover OOM rollback, WATCH, transactions, access order, and snapshot restart. Formatting
+cover OOM rollback, WATCH, transactions, access order, runtime configuration,
+and snapshot restart. Formatting
 and Clippy are checked.
 
 These are ReRu regression tests. A differential suite against a running pinned

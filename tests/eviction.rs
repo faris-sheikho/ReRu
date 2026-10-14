@@ -113,3 +113,51 @@ fn lru_evictions_are_saved_in_snapshot() {
     }
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn config_get_set_changes_memory_policy_at_runtime() {
+    let server = Server::start();
+    let mut client = Client::new(&server);
+    let mut watcher = Client::new(&server);
+    let value = vec![b'q'; 100];
+    assert_eq!(
+        client.call(&[b"CONFIG", b"GET", b"maxmemory", b"maxmemory-policy"]),
+        array(vec![
+            bulk(b"maxmemory"),
+            bulk(b"0"),
+            bulk(b"maxmemory-policy"),
+            bulk(b"noeviction"),
+        ])
+    );
+    assert_eq!(
+        client.call(&[b"CONFIG", b"SET", b"maxmemory", b"330"]),
+        ok()
+    );
+    assert_eq!(client.call(&[b"SET", b"a", &value]), ok());
+    assert_eq!(client.call(&[b"SET", b"b", &value]), ok());
+    assert_eq!(watcher.call(&[b"WATCH", b"a"]), ok());
+    assert!(matches!(
+        client.call(&[b"CONFIG", b"SET", b"maxmemory-policy", b"bogus"]),
+        Reply::Error(_)
+    ));
+    assert_eq!(
+        client.call(&[b"CONFIG", b"GET", b"*policy"]),
+        array(vec![bulk(b"maxmemory-policy"), bulk(b"noeviction")])
+    );
+    assert_eq!(
+        client.call(&[
+            b"CONFIG",
+            b"SET",
+            b"maxmemory-policy",
+            b"allkeys-lru",
+            b"maxmemory",
+            b"165"
+        ]),
+        ok()
+    );
+    assert_eq!(client.call(&[b"GET", b"a"]), Reply::Bulk(None));
+    assert_eq!(client.call(&[b"GET", b"b"]), bulk(&value));
+    assert_eq!(watcher.call(&[b"MULTI"]), ok());
+    assert_eq!(watcher.call(&[b"GET", b"b"]), queued());
+    assert_eq!(watcher.call(&[b"EXEC"]), Reply::Array(None));
+}

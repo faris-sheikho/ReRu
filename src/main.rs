@@ -138,7 +138,11 @@ fn invalidate_watch(store: &Store, key: &[u8]) {
 type Store = Arc<SharedStore>;
 
 fn is_mutating(command: &[Vec<u8>]) -> bool {
-    cache::is_mutating(command)
+    (command[0].eq_ignore_ascii_case(b"CONFIG")
+        && command
+            .get(1)
+            .is_some_and(|name| name.eq_ignore_ascii_case(b"SET")))
+        || cache::is_mutating(command)
         || bitmaps::is_mutating(command)
         || sorted_sets::is_mutating(command)
         || collections::is_mutating(command)
@@ -168,6 +172,7 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
         || !is_mutating(command)
         || response.starts_with(b"-")
         || command[0].eq_ignore_ascii_case(b"DEL")
+        || command[0].eq_ignore_ascii_case(b"CONFIG")
         || command[0].eq_ignore_ascii_case(b"BLPOP")
     {
         return;
@@ -190,12 +195,16 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
 // The caller holds command_gate. A bounded noeviction write is staged so an OOM
 // response cannot leave partial data or invalidate WATCH registrations.
 fn execute_checked(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
-    if !is_mutating(command) || !store.eviction.enabled() {
+    let settings = store.eviction.settings();
+    if !is_mutating(command)
+        || settings.maxmemory == 0
+        || command[0].eq_ignore_ascii_case(b"CONFIG")
+    {
         let response = execute_command(command, store, allow_blocking);
         record_write(store, command, &response);
         return response;
     }
-    if store.eviction.policy == eviction::Policy::AllKeysLru {
+    if settings.policy == eviction::Policy::AllKeysLru {
         let response = execute_command(command, store, allow_blocking);
         record_write(store, command, &response);
         if !response.starts_with(b"-") {
@@ -211,7 +220,7 @@ fn execute_checked(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
     let response = execute_command(command, store, allow_blocking);
     record_write(store, command, &response);
     let after_bytes = eviction::dataset_bytes(&store.entries.lock().unwrap());
-    let overflow = after_bytes > store.eviction.maxmemory && after_bytes > before_bytes;
+    let overflow = after_bytes > settings.maxmemory && after_bytes > before_bytes;
     let changed = store.staged_keys.lock().unwrap().take().unwrap();
     if overflow || response.starts_with(b"-") {
         *store.entries.lock().unwrap() = before;
@@ -502,7 +511,9 @@ fn xread_ids(
 
 fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
     store.eviction.touch(command, store);
-    if let Some(response) = cache::execute(command, store) {
+    if command[0].eq_ignore_ascii_case(b"CONFIG") {
+        eviction::execute_config(command, store)
+    } else if let Some(response) = cache::execute(command, store) {
         response
     } else if let Some(response) = bitmaps::execute(command, store) {
         response
@@ -913,7 +924,9 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
 fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     let name = &command[0];
     let arity = command.len();
-    let valid = if let Some(valid) = cache::valid_arity(command) {
+    let valid = if let Some(valid) = eviction::valid_arity(command) {
+        valid
+    } else if let Some(valid) = cache::valid_arity(command) {
         valid
     } else if let Some(valid) = bitmaps::valid_arity(command) {
         valid
