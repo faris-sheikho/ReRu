@@ -31,6 +31,7 @@ fn representative_resp2_sequences_match_a_real_redis_server() {
         b"reru-diff:zlex",
         b"reru-diff:stream",
         b"reru-diff:copy",
+        b"reru-diff:bitfield",
     ];
     let mut reset = vec![b"DEL".as_slice()];
     reset.extend(keys);
@@ -188,6 +189,88 @@ fn representative_resp2_sequences_match_a_real_redis_server() {
         ],
         &[b"ZREMRANGEBYLEX", b"reru-diff:zlex", b"[b", b"+"],
         &[b"ZRANGE", b"reru-diff:zlex", b"0", b"-1"],
+    ] {
+        compare(&mut ours, &mut redis, command);
+    }
+
+    for command in [
+        &[
+            b"BITFIELD".as_slice(),
+            b"reru-diff:bitfield",
+            b"GET",
+            b"i8",
+            b"#0",
+        ] as &[&[u8]],
+        &[
+            b"BITFIELD",
+            b"reru-diff:bitfield",
+            b"SET",
+            b"i8",
+            b"#0",
+            b"127",
+        ],
+        &[
+            b"BITFIELD",
+            b"reru-diff:bitfield",
+            b"INCRBY",
+            b"i8",
+            b"#0",
+            b"1",
+        ],
+        &[b"BITFIELD_RO", b"reru-diff:bitfield", b"GET", b"i8", b"#0"],
+        &[
+            b"BITFIELD",
+            b"reru-diff:bitfield",
+            b"OVERFLOW",
+            b"SAT",
+            b"INCRBY",
+            b"i8",
+            b"#0",
+            b"-10",
+            b"GET",
+            b"u4",
+            b"4",
+        ],
+        &[
+            b"BITFIELD",
+            b"reru-diff:bitfield",
+            b"OVERFLOW",
+            b"FAIL",
+            b"INCRBY",
+            b"u2",
+            b"#4",
+            b"-1",
+        ],
+        &[
+            b"BITFIELD",
+            b"reru-diff:bitfield",
+            b"OVERFLOW",
+            b"SAT",
+            b"SET",
+            b"u2",
+            b"#4",
+            b"9",
+        ],
+        &[
+            b"BITFIELD",
+            b"reru-diff:bitfield",
+            b"OVERFLOW",
+            b"FAIL",
+            b"INCRBY",
+            b"u2",
+            b"#4",
+            b"1",
+        ],
+        &[
+            b"BITFIELD",
+            b"reru-diff:bitfield",
+            b"SET",
+            b"u5",
+            b"7",
+            b"23",
+        ],
+        &[b"GET", b"reru-diff:bitfield"],
+        &[b"BITFIELD_RO", b"reru-diff:bitfield", b"GET", b"u5", b"7"],
     ] {
         compare(&mut ours, &mut redis, command);
     }

@@ -45,7 +45,8 @@ count. These memory figures are not the process's actual RAM use.
   `SUNION`/`SINTER`/`SDIFF` with destination storing variants; `SSCAN`
 - Sorted-set insertion, score/rank lookup, score and lex bounded ranges, counts,
   range removal, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, and `ZPOPMAX`
-- Bitmap operations on strings: `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, and `BITPOS`
+- Bitmap operations on strings: `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`,
+  `BITPOS`, `BITFIELD`, and `BITFIELD_RO`
 - Optional memory limit with OOM rejection and ten maxmemory policies
 - `CONFIG GET/SET` for `maxmemory` and `maxmemory-policy`
 - `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, and `PERSIST`
@@ -58,8 +59,8 @@ count. These memory figures are not the process's actual RAM use.
 - Optional append-only persistence with restart and partial-tail recovery;
   `EXPIREAT` and `PEXPIREAT` for absolute key expiry
 
-142 Redis command metadata entries have an implementation path, with limitations
-documented in the [compatibility status](docs/COMPATIBILITY.md). This is 30.9%
+144 Redis command metadata entries have an implementation path, with limitations
+documented in the [compatibility status](docs/COMPATIBILITY.md). This is 31.4%
 of the 459 entries in the pinned Redis 8.10.2 command metadata, **not** 30.9%
 Redis compatibility. ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.

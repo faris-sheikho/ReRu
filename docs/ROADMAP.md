@@ -11,7 +11,7 @@ local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
 The latest increment adds stream deletion/trimming/reverse ranges, set
 intersection cardinality, and sorted-set lex ranges. A small differential
-suite has passed against Redis 7.0.15; testing against the pinned version and
+suite has passed against Redis 7.0.15, including bitfield operations; testing against the pinned version and
 across every supported option remains pending.
 Redis 8.10.2 is the pinned compatibility reference. The current Rust code uses
 upstream documentation for behavior; a direct source-translation license has
@@ -25,7 +25,7 @@ not been selected.
 - Compare observable behavior against a real Redis server and keep regression
   tests for every command before marking it complete.
 - Track command-name presence separately from verified behavior and subsystem
-  coverage. The current 142/459 metadata entries (30.9%) do not establish
+  coverage. The current 144/459 metadata entries (31.4%) do not establish
   30–40% implementation of Redis.
 - Keep the server usable after every small, tested commit.
 

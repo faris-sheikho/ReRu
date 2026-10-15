@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::{mark_modified, protocol, remove_expired, Entry, Store, Value};
 
 const MAX_BITMAP_BYTES: usize = 64 * 1024 * 1024;
@@ -9,6 +11,8 @@ enum Command {
     Count,
     Op,
     Pos,
+    Field,
+    FieldReadOnly,
 }
 
 fn parse(name: &[u8]) -> Option<Command> {
@@ -19,6 +23,8 @@ fn parse(name: &[u8]) -> Option<Command> {
         (b"BITCOUNT", Count),
         (b"BITOP", Op),
         (b"BITPOS", Pos),
+        (b"BITFIELD", Field),
+        (b"BITFIELD_RO", FieldReadOnly),
     ]
     .iter()
     .find(|(candidate, _)| name.eq_ignore_ascii_case(candidate))
@@ -32,11 +38,244 @@ pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
         Command::Count => matches!(command.len(), 2 | 4 | 5),
         Command::Op => command.len() >= 4,
         Command::Pos => (3..=6).contains(&command.len()),
+        Command::Field | Command::FieldReadOnly => command.len() >= 2,
     })
 }
 
 pub fn is_mutating(command: &[Vec<u8>]) -> bool {
-    parse(&command[0]).is_some_and(|kind| matches!(kind, Command::Set | Command::Op))
+    parse(&command[0])
+        .is_some_and(|kind| matches!(kind, Command::Set | Command::Op | Command::Field))
+}
+
+#[derive(Clone, Copy)]
+struct FieldSpec {
+    width: u32,
+    signed: bool,
+    position: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Overflow {
+    Wrap,
+    Saturate,
+    Fail,
+}
+
+enum FieldAction {
+    Get(FieldSpec),
+    Set(FieldSpec, i64, Overflow),
+    Increment(FieldSpec, i64, Overflow),
+}
+
+fn field_encoding(bytes: &[u8]) -> Result<(u32, bool), Vec<u8>> {
+    let (signed, digits) = match bytes.split_first() {
+        Some((b'i', digits)) => (true, digits),
+        Some((b'u', digits)) => (false, digits),
+        _ => return Err(protocol::error("invalid bitfield type")),
+    };
+    let width = std::str::from_utf8(digits)
+        .ok()
+        .and_then(|text| text.parse::<u32>().ok())
+        .filter(|width| *width > 0 && *width <= if signed { 64 } else { 63 })
+        .ok_or_else(|| protocol::error("invalid bitfield type"))?;
+    Ok((width, signed))
+}
+
+fn field_position(bytes: &[u8], width: u32, writing: bool) -> Result<usize, Vec<u8>> {
+    let (number, multiplier) = if bytes.first() == Some(&b'#') {
+        (&bytes[1..], width as u64)
+    } else {
+        (bytes, 1)
+    };
+    let index = std::str::from_utf8(number)
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .and_then(|value| value.checked_mul(multiplier))
+        .ok_or_else(|| protocol::error("bit offset is not an integer or out of range"))?;
+    let last = index
+        .checked_add(u64::from(width) - 1)
+        .ok_or_else(|| protocol::error("bit offset is not an integer or out of range"))?;
+    let maximum = if writing {
+        (MAX_BITMAP_BYTES as u64) * 8 - 1
+    } else {
+        u32::MAX as u64
+    };
+    if last > maximum {
+        return Err(protocol::error(
+            "bit offset is not an integer or out of range",
+        ));
+    }
+    Ok(index as usize)
+}
+
+fn field_actions(command: &[Vec<u8>], read_only: bool) -> Result<Vec<FieldAction>, Vec<u8>> {
+    let mut actions = Vec::new();
+    let mut at = 2;
+    let mut overflow = Overflow::Wrap;
+    while at < command.len() {
+        let name = &command[at];
+        if name.eq_ignore_ascii_case(b"OVERFLOW") && !read_only {
+            let Some(mode) = command.get(at + 1) else {
+                return Err(protocol::error("syntax error"));
+            };
+            overflow = if mode.eq_ignore_ascii_case(b"WRAP") {
+                Overflow::Wrap
+            } else if mode.eq_ignore_ascii_case(b"SAT") {
+                Overflow::Saturate
+            } else if mode.eq_ignore_ascii_case(b"FAIL") {
+                Overflow::Fail
+            } else {
+                return Err(protocol::error("syntax error"));
+            };
+            at += 2;
+            continue;
+        }
+        let get = name.eq_ignore_ascii_case(b"GET");
+        let set = name.eq_ignore_ascii_case(b"SET") && !read_only;
+        let increment = name.eq_ignore_ascii_case(b"INCRBY") && !read_only;
+        if !get && !set && !increment {
+            return Err(protocol::error("syntax error"));
+        }
+        let needed = if get { 3 } else { 4 };
+        if at + needed > command.len() {
+            return Err(protocol::error("syntax error"));
+        }
+        let (width, is_signed) = field_encoding(&command[at + 1])?;
+        let position = field_position(&command[at + 2], width, !get)?;
+        let spec = FieldSpec {
+            width,
+            signed: is_signed,
+            position,
+        };
+        actions.push(if get {
+            FieldAction::Get(spec)
+        } else if set {
+            FieldAction::Set(spec, signed(&command[at + 3])?, overflow)
+        } else {
+            FieldAction::Increment(spec, signed(&command[at + 3])?, overflow)
+        });
+        at += needed;
+    }
+    Ok(actions)
+}
+
+fn field_read(bytes: &[u8], spec: FieldSpec) -> i64 {
+    let mut raw = 0u64;
+    for index in spec.position..spec.position + spec.width as usize {
+        let bit = bytes
+            .get(index / 8)
+            .map_or(0, |byte| (byte >> (7 - index % 8)) & 1);
+        raw = (raw << 1) | u64::from(bit);
+    }
+    if spec.signed && spec.width < 64 && raw & (1u64 << (spec.width - 1)) != 0 {
+        (i128::from(raw) - (1i128 << spec.width)) as i64
+    } else {
+        raw as i64
+    }
+}
+
+fn field_write(bytes: &mut Vec<u8>, spec: FieldSpec, value: i64) {
+    let end = spec.position + spec.width as usize;
+    bytes.resize(bytes.len().max(end.div_ceil(8)), 0);
+    let raw = value as u64;
+    for bit in 0..spec.width as usize {
+        let index = spec.position + bit;
+        let mask = 0x80 >> (index % 8);
+        if raw & (1u64 << (spec.width as usize - bit - 1)) != 0 {
+            bytes[index / 8] |= mask;
+        } else {
+            bytes[index / 8] &= !mask;
+        }
+    }
+}
+
+fn field_overflow(value: i128, spec: FieldSpec, overflow: Overflow) -> Option<i64> {
+    let minimum = if spec.signed {
+        -(1i128 << (spec.width - 1))
+    } else {
+        0
+    };
+    let maximum = if spec.signed {
+        (1i128 << (spec.width - 1)) - 1
+    } else {
+        (1i128 << spec.width) - 1
+    };
+    if (minimum..=maximum).contains(&value) {
+        return Some(value as i64);
+    }
+    match overflow {
+        Overflow::Fail => None,
+        Overflow::Saturate => Some(value.clamp(minimum, maximum) as i64),
+        Overflow::Wrap => {
+            let modulus = 1i128 << spec.width;
+            let wrapped = value.rem_euclid(modulus);
+            Some(if spec.signed && wrapped > maximum {
+                (wrapped - modulus) as i64
+            } else {
+                wrapped as i64
+            })
+        }
+    }
+}
+
+fn bitfield(command: &[Vec<u8>], store: &Store, read_only: bool) -> Vec<u8> {
+    let actions = match field_actions(command, read_only) {
+        Ok(actions) => actions,
+        Err(error) => return error,
+    };
+    let key = &command[1];
+    let mut entries = store.entries.lock().unwrap();
+    remove_expired(&mut entries, key);
+    let mut bytes: Cow<'_, [u8]> = match entries.get(key).map(|entry| &entry.value) {
+        Some(Value::String(bytes)) => Cow::Borrowed(bytes),
+        Some(_) => return wrong_type(),
+        None => Cow::Borrowed(&[]),
+    };
+    let mut modified = false;
+    let mut replies = Vec::new();
+    for action in actions {
+        match action {
+            FieldAction::Get(spec) => replies.push(Some(field_read(&bytes, spec))),
+            FieldAction::Set(spec, value, overflow) => {
+                let old = field_read(&bytes, spec);
+                if let Some(value) = field_overflow(i128::from(value), spec, overflow) {
+                    field_write(bytes.to_mut(), spec, value);
+                    modified = true;
+                    replies.push(Some(old));
+                } else {
+                    replies.push(None);
+                }
+            }
+            FieldAction::Increment(spec, increment, overflow) => {
+                let old = field_read(&bytes, spec);
+                let next = i128::from(old) + i128::from(increment);
+                if let Some(value) = field_overflow(next, spec, overflow) {
+                    field_write(bytes.to_mut(), spec, value);
+                    modified = true;
+                    replies.push(Some(value));
+                } else {
+                    replies.push(None);
+                }
+            }
+        }
+    }
+    if modified {
+        let bytes = bytes.into_owned();
+        let entry = entries.entry(key.clone()).or_insert_with(|| Entry {
+            value: Value::String(Vec::new()),
+            expires_at: None,
+        });
+        entry.value = Value::String(bytes);
+        mark_modified(store, key);
+    }
+    let mut response = format!("*{}\r\n", replies.len()).into_bytes();
+    for reply in replies {
+        match reply {
+            Some(value) => response.extend(integer(value)),
+            None => response.extend_from_slice(b"$-1\r\n"),
+        }
+    }
+    response
 }
 
 fn integer(value: i64) -> Vec<u8> {
@@ -218,6 +457,13 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
     if matches!(kind, Command::Op) {
         return Some(bitop(command, store));
     }
+    if matches!(kind, Command::Field | Command::FieldReadOnly) {
+        return Some(bitfield(
+            command,
+            store,
+            matches!(kind, Command::FieldReadOnly),
+        ));
+    }
     let key = &command[1];
     let mut entries = store.entries.lock().unwrap();
     remove_expired(&mut entries, key);
@@ -328,6 +574,6 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
                 -1
             })
         }
-        Command::Op => unreachable!(),
+        Command::Op | Command::Field | Command::FieldReadOnly => unreachable!(),
     })
 }
