@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StreamId {
     pub milliseconds: u64,
     pub sequence: u64,
@@ -46,6 +47,7 @@ pub struct StreamEntry {
 #[derive(Clone, Default, Debug)]
 pub struct Stream {
     pub entries: Vec<StreamEntry>,
+    pub last_generated_id: StreamId,
 }
 
 enum IdInput {
@@ -86,7 +88,8 @@ impl Stream {
         raw_id: &[u8],
         fields: Vec<Vec<u8>>,
     ) -> Result<StreamId, &'static str> {
-        let last = self.entries.last().map(|entry| entry.id);
+        let last =
+            (self.last_generated_id != StreamId::default()).then_some(self.last_generated_id);
         let id = match IdInput::parse(raw_id)? {
             IdInput::Automatic => {
                 let now = SystemTime::now()
@@ -115,6 +118,7 @@ impl Stream {
             );
         }
         self.entries.push(StreamEntry { id, fields });
+        self.last_generated_id = id;
         Ok(id)
     }
 
@@ -152,6 +156,26 @@ impl Stream {
             .collect())
     }
 
+    pub fn range_reverse(
+        &self,
+        end: &[u8],
+        start: &[u8],
+        count: Option<usize>,
+    ) -> Result<Vec<&StreamEntry>, &'static str> {
+        let (end, end_exclusive) = parse_bound(end, true)?;
+        let (start, start_exclusive) = parse_bound(start, false)?;
+        Ok(self
+            .entries
+            .iter()
+            .rev()
+            .filter(|entry| {
+                (entry.id < end || (!end_exclusive && entry.id == end))
+                    && (entry.id > start || (!start_exclusive && entry.id == start))
+            })
+            .take(count.unwrap_or(usize::MAX))
+            .collect())
+    }
+
     pub fn after(&self, id: StreamId, count: usize) -> Vec<&StreamEntry> {
         self.entries
             .iter()
@@ -161,13 +185,25 @@ impl Stream {
     }
 
     pub fn last_id(&self) -> StreamId {
-        self.entries.last().map_or(
-            StreamId {
-                milliseconds: 0,
-                sequence: 0,
-            },
-            |entry| entry.id,
-        )
+        self.last_generated_id
+    }
+
+    pub fn delete(&mut self, ids: &HashSet<StreamId>) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|entry| !ids.contains(&entry.id));
+        before - self.entries.len()
+    }
+
+    pub fn trim_maxlen(&mut self, maxlen: usize) -> usize {
+        let removed = self.entries.len().saturating_sub(maxlen);
+        self.entries.drain(..removed);
+        removed
+    }
+
+    pub fn trim_minid(&mut self, minid: StreamId) -> usize {
+        let removed = self.entries.partition_point(|entry| entry.id < minid);
+        self.entries.drain(..removed);
+        removed
     }
 }
 
@@ -236,5 +272,27 @@ mod tests {
         assert!(stream.append(b"1-1", vec![]).is_err());
         assert!(stream.append(b"garbage", vec![]).is_err());
         assert_eq!(stream.entries.len(), 2);
+    }
+
+    #[test]
+    fn reverse_ranges_obey_inclusive_and_exclusive_bounds() {
+        let mut stream = Stream::default();
+        for id in [b"1-0".as_slice(), b"1-1", b"2-0"] {
+            stream.append(id, vec![b"f".to_vec(), id.to_vec()]).unwrap();
+        }
+        let ids: Vec<_> = stream
+            .range_reverse(b"+", b"-", Some(2))
+            .unwrap()
+            .iter()
+            .map(|entry| entry.id.to_string())
+            .collect();
+        assert_eq!(ids, ["2-0", "1-1"]);
+        let ids: Vec<_> = stream
+            .range_reverse(b"(2-0", b"1-0", None)
+            .unwrap()
+            .iter()
+            .map(|entry| entry.id.to_string())
+            .collect();
+        assert_eq!(ids, ["1-1", "1-0"]);
     }
 }

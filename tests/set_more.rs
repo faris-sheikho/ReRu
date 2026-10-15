@@ -12,6 +12,35 @@ fn bulk(value: &[u8]) -> Reply {
 }
 
 #[test]
+fn intersection_cardinality_accepts_a_limit_and_validates_key_count() {
+    let server = Server::start();
+    let mut c = Client::new(&server);
+    assert_eq!(
+        c.call(&[b"SADD", b"a", b"one", b"two", b"three"]),
+        integer(3)
+    );
+    assert_eq!(c.call(&[b"SADD", b"b", b"two", b"three"]), integer(2));
+    assert_eq!(c.call(&[b"SINTERCARD", b"2", b"a", b"b"]), integer(2));
+    assert_eq!(
+        c.call(&[b"SINTERCARD", b"2", b"a", b"b", b"LIMIT", b"1"]),
+        integer(1)
+    );
+    assert_eq!(
+        c.call(&[b"SINTERCARD", b"2", b"a", b"b", b"LIMIT", b"0"]),
+        integer(2)
+    );
+    assert_eq!(c.call(&[b"SINTERCARD", b"2", b"a", b"missing"]), integer(0));
+    assert!(matches!(
+        c.call(&[b"SINTERCARD", b"0", b"a"]),
+        Reply::Error(_)
+    ));
+    assert!(matches!(
+        c.call(&[b"SINTERCARD", b"2", b"a"]),
+        Reply::Error(_)
+    ));
+}
+
+#[test]
 fn set_store_commands_replace_destination_and_reset_ttl() {
     let server = Server::start();
     let mut client = Client::new(&server);

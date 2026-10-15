@@ -29,6 +29,7 @@ enum Command {
     Scard,
     Sunion,
     Sinter,
+    Sintercard,
     Sdiff,
     Sunionstore,
     Sinterstore,
@@ -64,6 +65,7 @@ const COMMANDS: &[(&[u8], Command)] = &[
     (b"SCARD", Command::Scard),
     (b"SUNION", Command::Sunion),
     (b"SINTER", Command::Sinter),
+    (b"SINTERCARD", Command::Sintercard),
     (b"SDIFF", Command::Sdiff),
     (b"SUNIONSTORE", Command::Sunionstore),
     (b"SINTERSTORE", Command::Sinterstore),
@@ -91,6 +93,7 @@ impl Command {
             Hmget | Hdel | Sadd | Srem | Smismember => count >= 3,
             Hgetall | Hlen | Hkeys | Hvals | Smembers | Scard => count == 2,
             Sunion | Sinter | Sdiff => count >= 2,
+            Sintercard => count >= 3,
             Sunionstore | Sinterstore | Sdiffstore => count >= 3,
             Smove => count == 4,
             Spop | Srandmember => count == 2 || count == 3,
@@ -213,9 +216,8 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
     use Command::*;
     Some(match kind {
         Sadd | Srem | Sismember | Smismember | Smembers | Scard | Sunion | Sinter | Sdiff
-        | Sunionstore | Sinterstore | Sdiffstore | Smove | Spop | Srandmember | Sscan => {
-            execute_set(kind, command, store)
-        }
+        | Sunionstore | Sinterstore | Sdiffstore | Smove | Spop | Srandmember | Sscan
+        | Sintercard => execute_set(kind, command, store),
         _ => execute_hash(kind, command, store),
     })
 }
@@ -455,6 +457,56 @@ fn random_members(set: &HashSet<Vec<u8>>, count: usize) -> Vec<Vec<u8>> {
 fn execute_set(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
     use Command::*;
     let mut entries = store.entries.lock().unwrap();
+    if matches!(kind, Sintercard) {
+        let numkeys = match std::str::from_utf8(&command[1])
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+        {
+            Some(value) => value,
+            None => return protocol::error("numkeys should be greater than 0"),
+        };
+        let end = match 2usize.checked_add(numkeys) {
+            Some(value) if value <= command.len() => value,
+            _ => return protocol::error("syntax error"),
+        };
+        let limit = if end == command.len() {
+            0
+        } else if end + 2 == command.len() && command[end].eq_ignore_ascii_case(b"LIMIT") {
+            match std::str::from_utf8(&command[end + 1])
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                Some(value) => value,
+                None => return protocol::error("LIMIT can't be negative"),
+            }
+        } else {
+            return protocol::error("syntax error");
+        };
+        let keys = &command[2..end];
+        for key in keys {
+            remove_expired(&mut entries, key);
+        }
+        let mut sets = Vec::new();
+        let mut missing = false;
+        for key in keys {
+            match entries.get(key).map(|entry| &entry.value) {
+                Some(Value::Set(set)) => sets.push(set),
+                Some(_) => return wrong_type(),
+                None => missing = true,
+            }
+        }
+        if missing {
+            return integer(0);
+        }
+        sets.sort_unstable_by_key(|set| set.len());
+        let count = sets[0]
+            .iter()
+            .filter(|member| sets[1..].iter().all(|set| set.contains(*member)))
+            .take(if limit == 0 { usize::MAX } else { limit })
+            .count();
+        return integer(count as i64);
+    }
     if matches!(
         kind,
         Sunion | Sinter | Sdiff | Sunionstore | Sinterstore | Sdiffstore

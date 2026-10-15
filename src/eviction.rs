@@ -289,6 +289,14 @@ impl Eviction {
             command[1..].iter().collect()
         } else if name.eq_ignore_ascii_case(b"MSET") || name.eq_ignore_ascii_case(b"MSETNX") {
             command[1..].iter().step_by(2).collect()
+        } else if name.eq_ignore_ascii_case(b"SINTERCARD") {
+            let count = std::str::from_utf8(&command[1])
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            command[2..command.len().min(2usize.saturating_add(count))]
+                .iter()
+                .collect()
         } else if name.eq_ignore_ascii_case(b"BITOP") {
             command[2..].iter().collect()
         } else if name.eq_ignore_ascii_case(b"RENAME")

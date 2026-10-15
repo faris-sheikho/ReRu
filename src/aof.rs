@@ -66,6 +66,16 @@ fn append_value(output: &mut Vec<u8>, key: &[u8], entry: &Entry) -> io::Result<(
                 args.extend(item.fields.iter().map(Vec::as_slice));
                 command(output, &args);
             }
+            if stream.last_generated_id
+                > stream
+                    .entries
+                    .last()
+                    .map_or(crate::streams::StreamId::default(), |item| item.id)
+            {
+                let id = stream.last_generated_id.to_string();
+                command(output, &[b"XADD", key, id.as_bytes(), b"__reru_aof__", b""]);
+                command(output, &[b"XDEL", key, id.as_bytes()]);
+            }
         }
     }
     if let Some(deadline) = entry.expires_at {

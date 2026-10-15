@@ -172,6 +172,8 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             b"BLPOP",
             b"BRPOP",
             b"XADD",
+            b"XDEL",
+            b"XTRIM",
             b"DEL",
             b"UNLINK",
             b"RENAME",
@@ -204,6 +206,8 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
         || command[0].eq_ignore_ascii_case(b"CONFIG")
         || command[0].eq_ignore_ascii_case(b"BLPOP")
         || command[0].eq_ignore_ascii_case(b"BRPOP")
+        || command[0].eq_ignore_ascii_case(b"XDEL")
+        || command[0].eq_ignore_ascii_case(b"XTRIM")
     {
         return;
     }
@@ -901,10 +905,15 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                 Err(response) => response,
             }
         }
-    } else if command[0].eq_ignore_ascii_case(b"XRANGE") {
+    } else if command[0].eq_ignore_ascii_case(b"XRANGE")
+        || command[0].eq_ignore_ascii_case(b"XREVRANGE")
+    {
         if command.len() != 4 && (command.len() != 6 || !command[4].eq_ignore_ascii_case(b"COUNT"))
         {
-            protocol::error("wrong number of arguments for 'xrange' command")
+            protocol::error(&format!(
+                "wrong number of arguments for '{}' command",
+                String::from_utf8_lossy(&command[0]).to_ascii_lowercase()
+            ))
         } else {
             let count = if command.len() == 6 {
                 std::str::from_utf8(&command[5])
@@ -919,7 +928,11 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                     let mut entries = store.entries.lock().unwrap();
                     remove_expired(&mut entries, &command[1]);
                     match entries.get(&command[1]).map(|entry| &entry.value) {
-                            Some(Value::Stream(stream)) => match stream.range(&command[2], &command[3], Some(count)) {
+                            Some(Value::Stream(stream)) => match if command[0].eq_ignore_ascii_case(b"XREVRANGE") {
+                                stream.range_reverse(&command[2], &command[3], Some(count))
+                            } else {
+                                stream.range(&command[2], &command[3], Some(count))
+                            } {
                                 Ok(found) => protocol::stream_entries(&found),
                                 Err(message) => protocol::error(message),
                             },
@@ -927,6 +940,90 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                             None => protocol::array(&[]),
                         }
                 }
+            }
+        }
+    } else if command[0].eq_ignore_ascii_case(b"XDEL") {
+        if command.len() < 3 {
+            protocol::error("wrong number of arguments for 'xdel' command")
+        } else {
+            let mut ids = HashSet::new();
+            for raw in &command[2..] {
+                match streams::StreamId::parse_query(raw) {
+                    Ok(id) => {
+                        ids.insert(id);
+                    }
+                    Err(message) => return protocol::error(message),
+                }
+            }
+            let mut entries = store.entries.lock().unwrap();
+            remove_expired(&mut entries, &command[1]);
+            match entries.get_mut(&command[1]) {
+                Some(Entry {
+                    value: Value::Stream(stream),
+                    ..
+                }) => {
+                    let removed = stream.delete(&ids);
+                    if removed != 0 {
+                        mark_modified(store, &command[1]);
+                    }
+                    format!(":{removed}\r\n").into_bytes()
+                }
+                Some(_) => {
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec()
+                }
+                None => b":0\r\n".to_vec(),
+            }
+        }
+    } else if command[0].eq_ignore_ascii_case(b"XTRIM") {
+        if !(command.len() == 4 || (command.len() == 5 && command[3] == b"=")) {
+            protocol::error("syntax error")
+        } else {
+            let threshold = &command[command.len() - 1];
+            let maxlen = if command[2].eq_ignore_ascii_case(b"MAXLEN") {
+                match std::str::from_utf8(threshold)
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    Some(value) => Some(value),
+                    None => return protocol::error("value is not an integer or out of range"),
+                }
+            } else {
+                None
+            };
+            let minid = if command[2].eq_ignore_ascii_case(b"MINID") {
+                match streams::StreamId::parse_query(threshold) {
+                    Ok(value) => Some(value),
+                    Err(message) => return protocol::error(message),
+                }
+            } else {
+                None
+            };
+            if maxlen.is_none() && minid.is_none() {
+                return protocol::error("syntax error");
+            }
+            let mut entries = store.entries.lock().unwrap();
+            remove_expired(&mut entries, &command[1]);
+            match entries.get_mut(&command[1]) {
+                Some(Entry {
+                    value: Value::Stream(stream),
+                    ..
+                }) => {
+                    let removed = if let Some(maxlen) = maxlen {
+                        stream.trim_maxlen(maxlen)
+                    } else {
+                        stream.trim_minid(minid.unwrap())
+                    };
+                    if removed != 0 {
+                        mark_modified(store, &command[1]);
+                    }
+                    format!(":{removed}\r\n").into_bytes()
+                }
+                Some(_) => {
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec()
+                }
+                None => b":0\r\n".to_vec(),
             }
         }
     } else if command[0].eq_ignore_ascii_case(b"XREAD") {
@@ -1045,7 +1142,11 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
         arity == 2 || arity == 3
     } else if name.eq_ignore_ascii_case(b"XADD") {
         arity >= 5 && arity % 2 == 1
-    } else if name.eq_ignore_ascii_case(b"XRANGE") {
+    } else if name.eq_ignore_ascii_case(b"XDEL") {
+        arity >= 3
+    } else if name.eq_ignore_ascii_case(b"XTRIM") {
+        arity == 4 || arity == 5
+    } else if name.eq_ignore_ascii_case(b"XRANGE") || name.eq_ignore_ascii_case(b"XREVRANGE") {
         arity == 4 || (arity == 6 && command[4].eq_ignore_ascii_case(b"COUNT"))
     } else if name.eq_ignore_ascii_case(b"XREAD") {
         return parse_xread(command).map(|_| ());

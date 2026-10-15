@@ -10,10 +10,10 @@ tests; it does not certify complete compatibility with Redis.
 | Connection | `PING`, `ECHO` | PING with an optional message; RESP2 requests/replies |
 | Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `INCRBY`, `DECR`, `DECRBY`, `GETRANGE`, `SETRANGE` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access, integer arithmetic and byte ranges |
 | Lists | `RPUSH`, `LPUSH`, `LPUSHX`, `RPUSHX`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LREM`, `LPOS`, `LPOP`, `RPOP`, `RPOPLPUSH`, `LMOVE`, `BLPOP`, `BRPOP` | Multiple elements, negative indexes, edits, moves, position search, blocking left/right pops with timeout |
-| Streams | `XADD`, `XRANGE`, `XREAD`, `XLEN` | Entry IDs, ranges and blocking reads; no consumer groups |
+| Streams | `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, `XTRIM` | Entry IDs, forward/reverse ranges, deletion, exact MAXLEN/MINID trimming and blocking reads; no consumer groups |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, `HSCAN` | Binary fields/values, multiple field updates, missing-field nil replies, increments, random fields and cursor iteration |
-| Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `SSCAN` | Binary members, deduplication, membership, cardinality, random selection, atomic moves, set algebra and cursor iteration |
-| Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZCOUNT`, `ZREM`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, `ZPOPMAX` | Score-ordered members, rank and score ranges, ZADD NX/XX/GT/LT/CH/INCR, cursor iteration, range removal and ordered popping |
+| Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SINTERCARD`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `SSCAN` | Binary members, deduplication, membership, cardinality, random selection, atomic moves, set algebra and cursor iteration; SINTERCARD LIMIT |
+| Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANGEBYLEX`, `ZREVRANGEBYLEX`, `ZCOUNT`, `ZLEXCOUNT`, `ZREM`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYLEX`, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, `ZPOPMAX` | Score-ordered members, rank, score and lex ranges, ZADD NX/XX/GT/LT/CH/INCR, cursor iteration, range removal and ordered popping |
 | Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT |
 | Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `KEYS`, `SCAN`, `RANDOMKEY`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST` | Multiple keys, glob and type filtered scanning, rename/copy with TTL, relative/absolute expiry conditions |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
@@ -22,8 +22,12 @@ tests; it does not certify complete compatibility with Redis.
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 | Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
 
-Total: **133 public command names**. Supporting a command name does not mean that
-every Redis option for that command is implemented.
+Total: **142 Redis command metadata entries**, or **30.9% name presence**
+against 459 entries in the pinned Redis 8.10.2 metadata. This is neither a
+behavior pass rate nor a percentage of Redis completed. Run
+`powershell -File scripts/command_coverage.ps1 -RedisSource PATH_TO_REDIS_8_10_2`
+from the repository root to reproduce the count. Many options and error cases
+within those entries remain unsupported.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
 creation/deletion, and natural expiry. EXEC and DISCARD clear the connection's
@@ -36,7 +40,7 @@ field/member is removed. No-op HSETNX, HDEL, SADD and SREM preserve watches;
 HSET/HMSET writes invalidate watches even when values are unchanged. Hash/set
 enumeration is sorted in ReRu for stable output; clients should treat ordering
 as unspecified. HMSET is supported for older clients; prefer HSET for new code.
-`SPOP` and `SRANDMEMBER` use a randomized member order; count replies are capped
+`SINTERCARD` supports multiple keys and `LIMIT`. `SPOP` and `SRANDMEMBER` use a randomized member order; count replies are capped
 at one million elements to bound allocation. Set store variants replace the
 destination and clear its previous TTL.
 `HRANDFIELD` uses the same one-million count cap. `HINCRBYFLOAT` uses Rust `f64`
@@ -85,10 +89,17 @@ to the keyspace during a scan can shift the index and repeat or skip keys.
 Sorted sets keep a member lookup map and a score-ordered index. Score changes
 update both indexes. Rank lookup is still linear in the number of members;
 range scans advance through the ordered index. `ZRANGE` supports rank indexes,
-`BYSCORE`, `REV`, `WITHSCORES`, and `LIMIT` with score ranges; `BYLEX` and newer
-sorted-set commands remain. Bitmap growth is capped at 64 MiB per value, below Redis's
+`BYSCORE`, `BYLEX`, `REV`, `WITHSCORES`, and `LIMIT` on applicable ranges.
+Lex ranges use the score-ordered index and should be used with equal scores,
+the ordering condition documented by Redis. Bitmap growth is capped at 64 MiB per value, below Redis's
 maximum; this is an explicit ReRu resource limit. `BITFIELD` is not available.
 Strings and bitmaps share the same underlying value type.
+
+`XDEL` and exact `XTRIM MAXLEN|MINID` retain a stream's last generated ID
+when entries disappear. The ID survives ReRu snapshots and AOF replay.
+Approximate trimming (`~`), `LIMIT`, consumer-group references, and other
+stream options remain unimplemented. New stream snapshots use a revised type
+tag; new builds read older tags, but older builds cannot read new snapshots.
 
 ## Persistence and replication
 
@@ -128,7 +139,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **125 tests**: 9 unit tests and 116 server integration tests.
+The local suite has **131 tests**: 10 unit tests and 121 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,
@@ -137,8 +148,12 @@ cover OOM rollback, WATCH, transactions, policy selection, INFO counters,
 access order, runtime configuration, and snapshot restart. Keyspace tests cover rename/copy TTL, noeviction rollback,
 WATCH, TOUCH/LRU, and blocking-list wakeup. Formatting and Clippy are checked.
 
-These are ReRu regression tests. A differential suite against a running pinned
-Redis server is still required before making a compatibility claim.
+The suite includes an optional deterministic RESP2 differential test covering
+representative strings, lists, hashes, sets, sorted sets, streams, and transactions.
+It passed against a local Redis 7.0.15 instance with
+`RERU_REDIS_REFERENCE_PORT=6391 cargo test --test redis_differential`.
+Without the environment variable, that test skips its comparisons. The pinned
+8.10.2 release and a much broader behavior corpus still need verification.
 
 ## Remaining major work
 

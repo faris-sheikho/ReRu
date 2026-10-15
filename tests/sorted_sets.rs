@@ -161,6 +161,53 @@ fn sorted_set_range_removal_updates_indexes_and_deletes_empty_key() {
 }
 
 #[test]
+fn lexicographic_ranges_count_page_and_remove_binary_members() {
+    let server = common::Server::start();
+    let mut c = Client::new(&server);
+    assert_eq!(
+        c.call(&[b"ZADD", b"lex", b"0", b"a", b"0", b"b\0", b"0", b"c", b"0", b"d"]),
+        integer(4)
+    );
+    assert_eq!(c.call(&[b"ZLEXCOUNT", b"lex", b"(a", b"[c"]), integer(2));
+    assert_eq!(
+        c.call(&[b"ZRANGEBYLEX", b"lex", b"-", b"+"]),
+        values(&[b"a", b"b\0", b"c", b"d"])
+    );
+    assert_eq!(
+        c.call(&[b"ZRANGEBYLEX", b"lex", b"-", b"+", b"LIMIT", b"1", b"2"]),
+        values(&[b"b\0", b"c"])
+    );
+    assert_eq!(
+        c.call(&[b"ZREVRANGEBYLEX", b"lex", b"+", b"[b", b"LIMIT", b"0", b"2"]),
+        values(&[b"d", b"c"])
+    );
+    assert_eq!(
+        c.call(&[b"ZRANGE", b"lex", b"[b", b"+", b"BYLEX", b"LIMIT", b"1", b"2"]),
+        values(&[b"c", b"d"])
+    );
+    assert!(matches!(
+        c.call(&[b"ZRANGE", b"lex", b"[b", b"+", b"BYLEX", b"WITHSCORES"]),
+        Reply::Error(_)
+    ));
+    assert_eq!(
+        c.call(&[b"ZRANGE", b"lex", b"+", b"[b", b"BYLEX", b"REV"]),
+        values(&[b"d", b"c", b"b\0"])
+    );
+    assert_eq!(
+        c.call(&[b"ZREMRANGEBYLEX", b"lex", b"[b", b"(d"]),
+        integer(2)
+    );
+    assert_eq!(
+        c.call(&[b"ZRANGE", b"lex", b"0", b"-1"]),
+        values(&[b"a", b"d"])
+    );
+    assert!(matches!(
+        c.call(&[b"ZLEXCOUNT", b"lex", b"a", b"z"]),
+        Reply::Error(_)
+    ));
+}
+
+#[test]
 fn score_order_uses_binary_member_ties_and_negative_indexes() {
     let server = common::Server::start();
     let mut c = Client::new(&server);

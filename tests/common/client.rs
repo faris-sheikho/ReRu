@@ -16,7 +16,15 @@ pub struct Client(BufReader<TcpStream>);
 
 impl Client {
     pub fn new(server: &common::Server) -> Self {
-        Self(BufReader::new(server.connect().unwrap()))
+        Self::on_port(server.port)
+    }
+
+    pub fn on_port(port: u16) -> Self {
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        Self(BufReader::new(stream))
     }
 
     pub fn call(&mut self, args: &[&[u8]]) -> Reply {

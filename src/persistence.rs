@@ -89,7 +89,9 @@ pub fn encode(entries: &HashMap<Vec<u8>, Entry>) -> io::Result<Vec<u8>> {
                 }
             }
             Value::Stream(stream) => {
-                output.push(3);
+                output.push(7);
+                put_u64(&mut output, stream.last_generated_id.milliseconds);
+                put_u64(&mut output, stream.last_generated_id.sequence);
                 put_u64(
                     &mut output,
                     u64::try_from(stream.entries.len()).map_err(|_| invalid())?,
@@ -168,7 +170,15 @@ pub fn decode(bytes: &[u8]) -> io::Result<HashMap<Vec<u8>, Entry>> {
                 }
                 Value::List(items)
             }
-            3 => {
+            3 | 7 => {
+                let last_generated_id = if kind[0] == 7 {
+                    Some(streams::StreamId {
+                        milliseconds: read_u64(&mut cursor)?,
+                        sequence: read_u64(&mut cursor)?,
+                    })
+                } else {
+                    None
+                };
                 let count = usize::try_from(read_u64(&mut cursor)?).map_err(|_| invalid())?;
                 if count > MAX_ITEMS {
                     return Err(invalid());
@@ -192,6 +202,19 @@ pub fn decode(bytes: &[u8]) -> io::Result<HashMap<Vec<u8>, Entry>> {
                         return Err(invalid());
                     }
                     stream.entries.push(streams::StreamEntry { id, fields });
+                }
+                stream.last_generated_id = last_generated_id.unwrap_or_else(|| {
+                    stream
+                        .entries
+                        .last()
+                        .map_or(streams::StreamId::default(), |entry| entry.id)
+                });
+                if stream
+                    .entries
+                    .last()
+                    .is_some_and(|entry| stream.last_generated_id < entry.id)
+                {
+                    return Err(invalid());
                 }
                 Value::Stream(stream)
             }

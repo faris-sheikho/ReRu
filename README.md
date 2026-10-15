@@ -38,12 +38,12 @@ count. These memory figures are not the process's actual RAM use.
 - Cache-oriented string operations: conditional/expiring `SET`, `GETEX`, `GETDEL`,
   `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, legacy set variants,
   integer increment/decrement variants, `GETRANGE`, and `SETRANGE`
-- Initial `XADD`, `XRANGE`, `XREAD`, and `XLEN` support
+- Initial `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, and exact `XTRIM` support
 - Hash fields: `HSET`, `HGET`, multi-field operations, enumeration, deletion,
   `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, and `HSCAN`
-- Set membership, removal, cardinality, random selection, moves, and
+- Set membership, removal, cardinality, intersection cardinality, random selection, moves, and
   `SUNION`/`SINTER`/`SDIFF` with destination storing variants; `SSCAN`
-- Sorted-set insertion, score/rank lookup, score bounded ranges, counts,
+- Sorted-set insertion, score/rank lookup, score and lex bounded ranges, counts,
   range removal, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, and `ZPOPMAX`
 - Bitmap operations on strings: `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, and `BITPOS`
 - Optional memory limit with OOM rejection and ten maxmemory policies
@@ -58,8 +58,10 @@ count. These memory figures are not the process's actual RAM use.
 - Optional append-only persistence with restart and partial-tail recovery;
   `EXPIREAT` and `PEXPIREAT` for absolute key expiry
 
-133 public command names are supported, with limitations documented in the
-[compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
+142 Redis command metadata entries have an implementation path, with limitations
+documented in the [compatibility status](docs/COMPATIBILITY.md). This is 30.9%
+of the 459 entries in the pinned Redis 8.10.2 command metadata, **not** 30.9%
+Redis compatibility. ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 
 Redis RDB and full Redis AOF compatibility, PSYNC replication, clustering, authentication,
