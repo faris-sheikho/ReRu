@@ -32,7 +32,7 @@ count. These memory figures are not the process's actual RAM use.
 ## Current support
 
 - RESP2, concurrent clients, strings, lists, streams, hashes, sets, and sorted sets; key expiry
-- `PING`, `ECHO`, `SET`, `GET`, `INCR`, `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP`, `TYPE`
+- `PING`, `ECHO`, `SET`, `GET`, `INCR`, `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP`, `BRPOP`, `TYPE`
 - Additional list editing and movement: `RPOP`, `LINDEX`, `LSET`, `LTRIM`,
   `LINSERT`, `LPUSHX`, `RPUSHX`, `LMOVE`, `RPOPLPUSH`, `LPOS`, and `LREM`
 - Cache-oriented string operations: conditional/expiring `SET`, `GETEX`, `GETDEL`,
@@ -58,7 +58,7 @@ count. These memory figures are not the process's actual RAM use.
 - Optional append-only persistence with restart and partial-tail recovery;
   `EXPIREAT` and `PEXPIREAT` for absolute key expiry
 
-132 public command names are supported, with limitations documented in the
+133 public command names are supported, with limitations documented in the
 [compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 

@@ -9,7 +9,7 @@ tests; it does not certify complete compatibility with Redis.
 | --- | --- | --- |
 | Connection | `PING`, `ECHO` | PING with an optional message; RESP2 requests/replies |
 | Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `INCRBY`, `DECR`, `DECRBY`, `GETRANGE`, `SETRANGE` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access, integer arithmetic and byte ranges |
-| Lists | `RPUSH`, `LPUSH`, `LPUSHX`, `RPUSHX`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LREM`, `LPOS`, `LPOP`, `RPOP`, `RPOPLPUSH`, `LMOVE`, `BLPOP` | Multiple elements, negative indexes, edits, moves, position search, blocking left-pop with timeout |
+| Lists | `RPUSH`, `LPUSH`, `LPUSHX`, `RPUSHX`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LREM`, `LPOS`, `LPOP`, `RPOP`, `RPOPLPUSH`, `LMOVE`, `BLPOP`, `BRPOP` | Multiple elements, negative indexes, edits, moves, position search, blocking left/right pops with timeout |
 | Streams | `XADD`, `XRANGE`, `XREAD`, `XLEN` | Entry IDs, ranges and blocking reads; no consumer groups |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, `HSCAN` | Binary fields/values, multiple field updates, missing-field nil replies, increments, random fields and cursor iteration |
 | Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `SSCAN` | Binary members, deduplication, membership, cardinality, random selection, atomic moves, set algebra and cursor iteration |
@@ -22,7 +22,7 @@ tests; it does not certify complete compatibility with Redis.
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 | Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
 
-Total: **132 public command names**. Supporting a command name does not mean that
+Total: **133 public command names**. Supporting a command name does not mean that
 every Redis option for that command is implemented.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
@@ -128,7 +128,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **124 tests**: 9 unit tests and 115 server integration tests.
+The local suite has **125 tests**: 9 unit tests and 116 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,

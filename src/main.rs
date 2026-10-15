@@ -170,6 +170,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             b"LPUSH",
             b"LPOP",
             b"BLPOP",
+            b"BRPOP",
             b"XADD",
             b"DEL",
             b"UNLINK",
@@ -202,6 +203,7 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
         || command[0].eq_ignore_ascii_case(b"COPY")
         || command[0].eq_ignore_ascii_case(b"CONFIG")
         || command[0].eq_ignore_ascii_case(b"BLPOP")
+        || command[0].eq_ignore_ascii_case(b"BRPOP")
     {
         return;
     }
@@ -409,10 +411,11 @@ fn list_range(items: &[Vec<u8>], start: i64, stop: i64) -> Vec<u8> {
     }
 }
 
-fn try_blpop(
+fn try_blocking_pop(
     entries: &mut HashMap<Vec<u8>, Entry>,
     keys: &[Vec<u8>],
     store: &Store,
+    from_right: bool,
 ) -> Option<Vec<u8>> {
     for key in keys {
         remove_expired(entries, key);
@@ -421,7 +424,14 @@ fn try_blpop(
                 value: Value::List(items),
                 ..
             }) => {
-                let value = items.remove(0);
+                if items.is_empty() {
+                    continue;
+                }
+                let value = if from_right {
+                    items.pop().unwrap()
+                } else {
+                    items.remove(0)
+                };
                 if items.is_empty() {
                     entries.remove(key);
                 }
@@ -794,9 +804,13 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                 }
             }
         }
-    } else if command[0].eq_ignore_ascii_case(b"BLPOP") {
+    } else if command[0].eq_ignore_ascii_case(b"BLPOP") || command[0].eq_ignore_ascii_case(b"BRPOP")
+    {
         if command.len() < 3 {
-            protocol::error("wrong number of arguments for 'blpop' command")
+            protocol::error(&format!(
+                "wrong number of arguments for '{}' command",
+                String::from_utf8_lossy(&command[0]).to_ascii_lowercase()
+            ))
         } else {
             match blpop_deadline(command.last().unwrap()) {
                 Err(error) => error,
@@ -805,7 +819,12 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                     loop {
                         let gate = allow_blocking.then(|| store.command_gate.lock().unwrap());
                         let mut entries = store.entries.lock().unwrap();
-                        if let Some(response) = try_blpop(&mut entries, keys, store) {
+                        if let Some(response) = try_blocking_pop(
+                            &mut entries,
+                            keys,
+                            store,
+                            command[0].eq_ignore_ascii_case(b"BRPOP"),
+                        ) {
                             break response;
                         }
                         if !allow_blocking {
@@ -1017,6 +1036,7 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     } else if name.eq_ignore_ascii_case(b"RPUSH")
         || name.eq_ignore_ascii_case(b"LPUSH")
         || name.eq_ignore_ascii_case(b"BLPOP")
+        || name.eq_ignore_ascii_case(b"BRPOP")
     {
         arity >= 3
     } else if name.eq_ignore_ascii_case(b"LRANGE") {
@@ -1187,6 +1207,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 }
             }
         } else if command[0].eq_ignore_ascii_case(b"BLPOP")
+            || command[0].eq_ignore_ascii_case(b"BRPOP")
             || command[0].eq_ignore_ascii_case(b"XREAD")
         {
             let response = execute_command(&command, &store, true);

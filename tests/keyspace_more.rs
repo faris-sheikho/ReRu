@@ -104,3 +104,33 @@ fn rename_to_a_blocked_list_key_wakes_the_waiter() {
         client::array(vec![bulk(b"queue"), bulk(b"item")])
     );
 }
+
+#[test]
+fn brpop_reads_the_right_end_and_wakes_for_a_new_list() {
+    let server = common::Server::start();
+    let mut writer = Client::new(&server);
+    assert_eq!(
+        writer.call(&[b"RPUSH", b"existing", b"left", b"right"]),
+        integer(2)
+    );
+    assert_eq!(
+        writer.call(&[b"BRPOP", b"missing", b"existing", b"1"]),
+        client::array(vec![bulk(b"existing"), bulk(b"right")])
+    );
+    assert_eq!(
+        writer.call(&[b"LRANGE", b"existing", b"0", b"-1"]),
+        client::array(vec![bulk(b"left")])
+    );
+    let mut blocked = Client::new(&server);
+    let waiter = std::thread::spawn(move || blocked.call(&[b"BRPOP", b"new", b"2"]));
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    assert_eq!(writer.call(&[b"LPUSH", b"new", b"a", b"b"]), integer(2));
+    assert_eq!(
+        waiter.join().unwrap(),
+        client::array(vec![bulk(b"new"), bulk(b"a")])
+    );
+    assert_eq!(
+        writer.call(&[b"LRANGE", b"new", b"0", b"-1"]),
+        client::array(vec![bulk(b"b")])
+    );
+}

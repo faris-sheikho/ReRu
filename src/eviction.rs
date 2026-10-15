@@ -303,7 +303,7 @@ impl Eviction {
             crate::parse_xread(command)
                 .map(|options| options.keys.iter().collect())
                 .unwrap_or_default()
-        } else if name.eq_ignore_ascii_case(b"BLPOP") {
+        } else if name.eq_ignore_ascii_case(b"BLPOP") || name.eq_ignore_ascii_case(b"BRPOP") {
             command[1..command.len() - 1].iter().collect()
         } else if name.eq_ignore_ascii_case(b"PING")
             || name.eq_ignore_ascii_case(b"ECHO")
