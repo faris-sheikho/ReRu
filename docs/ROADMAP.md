@@ -5,7 +5,7 @@ first 20 CodeCrafters milestones, expanded list and set operations, initial stre
 optimistic locking, initial keyspace commands, core hashes and sets, initial
 sorted sets and bitmaps, common cache-oriented string commands, and optional
 logical-memory bounds with ten eviction policies, runtime memory configuration,
-partial INFO memory/stats, and keyspace scan/expiry inspection are implemented. Optional
+partial INFO memory/stats, keyspace and collection scans, and expiry inspection are implemented. Optional
 ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
 local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.

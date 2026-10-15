@@ -9,6 +9,57 @@ fn bulk(value: &[u8]) -> Reply {
 }
 
 #[test]
+fn legacy_set_commands_preserve_expected_conditional_and_expiry_behavior() {
+    let server = common::Server::start();
+    let mut c = Client::new(&server);
+    assert_eq!(c.call(&[b"SETNX", b"k", b"first"]), integer(1));
+    assert_eq!(c.call(&[b"SETNX", b"k", b"second"]), integer(0));
+    assert_eq!(c.call(&[b"GETSET", b"k", b"third"]), bulk(b"first"));
+    assert_eq!(c.call(&[b"GET", b"k"]), bulk(b"third"));
+    assert_eq!(c.call(&[b"SETEX", b"k", b"60", b"ex"]), ok());
+    assert!(matches!(c.call(&[b"TTL", b"k"]), Reply::Integer(ttl) if ttl > 0));
+    assert_eq!(c.call(&[b"PSETEX", b"k", b"60000", b"px"]), ok());
+    assert!(matches!(c.call(&[b"PTTL", b"k"]), Reply::Integer(ttl) if ttl > 0));
+    assert!(matches!(
+        c.call(&[b"SETEX", b"k", b"0", b"bad"]),
+        Reply::Error(_)
+    ));
+    assert_eq!(c.call(&[b"GET", b"k"]), bulk(b"px"));
+}
+
+#[test]
+fn integer_and_range_commands_handle_overflow_binary_padding_and_wrong_types() {
+    let server = common::Server::start();
+    let mut c = Client::new(&server);
+    assert_eq!(c.call(&[b"INCRBY", b"counter", b"5"]), integer(5));
+    assert_eq!(c.call(&[b"DECR", b"counter"]), integer(4));
+    assert_eq!(c.call(&[b"DECRBY", b"counter", b"-2"]), integer(6));
+    assert_eq!(c.call(&[b"SET", b"max", b"9223372036854775807"]), ok());
+    assert!(matches!(
+        c.call(&[b"INCRBY", b"max", b"1"]),
+        Reply::Error(_)
+    ));
+    assert_eq!(c.call(&[b"GET", b"max"]), bulk(b"9223372036854775807"));
+    assert_eq!(c.call(&[b"GETRANGE", b"missing", b"0", b"-1"]), bulk(b""));
+    assert_eq!(c.call(&[b"SETRANGE", b"binary", b"2", b"a\0b"]), integer(5));
+    assert_eq!(c.call(&[b"GET", b"binary"]), bulk(b"\0\0a\0b"));
+    assert_eq!(
+        c.call(&[b"GETRANGE", b"binary", b"-3", b"-1"]),
+        bulk(b"a\0b")
+    );
+    assert_eq!(c.call(&[b"SETRANGE", b"binary", b"3", b""]), integer(5));
+    assert_eq!(c.call(&[b"RPUSH", b"list", b"v"]), integer(1));
+    assert!(matches!(
+        c.call(&[b"GETRANGE", b"list", b"0", b"-1"]),
+        Reply::Error(_)
+    ));
+    assert!(matches!(
+        c.call(&[b"SETRANGE", b"list", b"0", b"x"]),
+        Reply::Error(_)
+    ));
+}
+
+#[test]
 fn set_conditions_get_and_keepttl_support_cache_locks() {
     let server = common::Server::start();
     let mut c = Client::new(&server);

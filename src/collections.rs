@@ -1,4 +1,4 @@
-use crate::{mark_modified, protocol, remove_expired, Entry, Store, Value};
+use crate::{mark_modified, protocol, pubsub::glob_matches, remove_expired, Entry, Store, Value};
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
@@ -17,6 +17,10 @@ enum Command {
     Hkeys,
     Hvals,
     Hincrby,
+    Hincrbyfloat,
+    Hstrlen,
+    Hrandfield,
+    Hscan,
     Sadd,
     Srem,
     Sismember,
@@ -32,6 +36,7 @@ enum Command {
     Smove,
     Spop,
     Srandmember,
+    Sscan,
 }
 
 const COMMANDS: &[(&[u8], Command)] = &[
@@ -47,6 +52,10 @@ const COMMANDS: &[(&[u8], Command)] = &[
     (b"HKEYS", Command::Hkeys),
     (b"HVALS", Command::Hvals),
     (b"HINCRBY", Command::Hincrby),
+    (b"HINCRBYFLOAT", Command::Hincrbyfloat),
+    (b"HSTRLEN", Command::Hstrlen),
+    (b"HRANDFIELD", Command::Hrandfield),
+    (b"HSCAN", Command::Hscan),
     (b"SADD", Command::Sadd),
     (b"SREM", Command::Srem),
     (b"SISMEMBER", Command::Sismember),
@@ -62,6 +71,7 @@ const COMMANDS: &[(&[u8], Command)] = &[
     (b"SMOVE", Command::Smove),
     (b"SPOP", Command::Spop),
     (b"SRANDMEMBER", Command::Srandmember),
+    (b"SSCAN", Command::Sscan),
 ];
 
 fn parse(name: &[u8]) -> Option<Command> {
@@ -76,14 +86,16 @@ impl Command {
         use Command::*;
         match self {
             Hset | Hmset => count >= 4 && count.is_multiple_of(2),
-            Hsetnx | Hincrby => count == 4,
-            Hget | Hexists | Sismember => count == 3,
+            Hsetnx | Hincrby | Hincrbyfloat => count == 4,
+            Hget | Hexists | Hstrlen | Sismember => count == 3,
             Hmget | Hdel | Sadd | Srem | Smismember => count >= 3,
             Hgetall | Hlen | Hkeys | Hvals | Smembers | Scard => count == 2,
             Sunion | Sinter | Sdiff => count >= 2,
             Sunionstore | Sinterstore | Sdiffstore => count >= 3,
             Smove => count == 4,
             Spop | Srandmember => count == 2 || count == 3,
+            Hrandfield => (2..=4).contains(&count),
+            Hscan | Sscan => count >= 3,
         }
     }
 
@@ -95,6 +107,7 @@ impl Command {
                 | Self::Hsetnx
                 | Self::Hdel
                 | Self::Hincrby
+                | Self::Hincrbyfloat
                 | Self::Sadd
                 | Self::Srem
                 | Self::Sunionstore
@@ -134,6 +147,61 @@ fn signed_integer(bytes: &[u8]) -> Option<i64> {
         .filter(|value| value.to_string().as_bytes() == bytes)
 }
 
+fn finite_float(bytes: &[u8]) -> Option<f64> {
+    std::str::from_utf8(bytes)
+        .ok()?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+struct ScanOptions<'a> {
+    cursor: usize,
+    count: usize,
+    pattern: Option<&'a [u8]>,
+    novalues: bool,
+}
+
+fn scan_options(command: &[Vec<u8>], hash: bool) -> Result<ScanOptions<'_>, Vec<u8>> {
+    let cursor = std::str::from_utf8(&command[2])
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| protocol::error("invalid cursor"))?;
+    let mut options = ScanOptions {
+        cursor,
+        count: 10,
+        pattern: None,
+        novalues: false,
+    };
+    let mut at = 3;
+    while at < command.len() {
+        if command[at].eq_ignore_ascii_case(b"NOVALUES") && hash && !options.novalues {
+            options.novalues = true;
+            at += 1;
+        } else if at + 1 < command.len() && command[at].eq_ignore_ascii_case(b"MATCH") {
+            options.pattern = Some(&command[at + 1]);
+            at += 2;
+        } else if at + 1 < command.len() && command[at].eq_ignore_ascii_case(b"COUNT") {
+            options.count = std::str::from_utf8(&command[at + 1])
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| protocol::error("value is not an integer or out of range"))?;
+            at += 2;
+        } else {
+            return Err(protocol::error("syntax error"));
+        }
+    }
+    Ok(options)
+}
+
+fn scan_reply(cursor: usize, values: &[Vec<u8>]) -> Vec<u8> {
+    let mut reply = b"*2\r\n".to_vec();
+    reply.extend(protocol::bulk(cursor.to_string().as_bytes()));
+    reply.extend(protocol::array(values));
+    reply
+}
+
 pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
     let kind = parse(&command[0])?;
     if !kind.valid_arity(command.len()) {
@@ -145,7 +213,7 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
     use Command::*;
     Some(match kind {
         Sadd | Srem | Sismember | Smismember | Smembers | Scard | Sunion | Sinter | Sdiff
-        | Sunionstore | Sinterstore | Sdiffstore | Smove | Spop | Srandmember => {
+        | Sunionstore | Sinterstore | Sdiffstore | Smove | Spop | Srandmember | Sscan => {
             execute_set(kind, command, store)
         }
         _ => execute_hash(kind, command, store),
@@ -162,6 +230,14 @@ fn execute_hash(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
         }
     } else {
         0
+    };
+    let float_increment = if matches!(kind, Hincrbyfloat) {
+        match finite_float(&command[3]) {
+            Some(value) => value,
+            None => return protocol::error("value is not a valid float"),
+        }
+    } else {
+        0.0
     };
     let key = &command[1];
     let mut entries = store.entries.lock().unwrap();
@@ -184,6 +260,79 @@ fn execute_hash(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
             hash.is_some_and(|hash| hash.contains_key(&command[2])),
         )),
         Hlen => integer(hash.map_or(0, |hash| hash.len()) as i64),
+        Hstrlen => integer(
+            hash.and_then(|hash| hash.get(&command[2]))
+                .map_or(0, |value| value.len()) as i64,
+        ),
+        Hscan => {
+            let options = match scan_options(command, true) {
+                Ok(options) => options,
+                Err(error) => return error,
+            };
+            let mut fields: Vec<_> = hash.into_iter().flat_map(|hash| hash.iter()).collect();
+            fields.sort_unstable_by_key(|(field, _)| *field);
+            let start = options.cursor.min(fields.len());
+            let end = start.saturating_add(options.count).min(fields.len());
+            let mut values = Vec::new();
+            for (field, value) in &fields[start..end] {
+                if options
+                    .pattern
+                    .is_none_or(|pattern| glob_matches(pattern, field))
+                {
+                    values.push((*field).clone());
+                    if !options.novalues {
+                        values.push((*value).clone());
+                    }
+                }
+            }
+            scan_reply(if end == fields.len() { 0 } else { end }, &values)
+        }
+        Hrandfield => {
+            if command.len() == 4 && !command[3].eq_ignore_ascii_case(b"WITHVALUES") {
+                return protocol::error("syntax error");
+            }
+            let requested = if command.len() >= 3 {
+                match signed_integer(&command[2]) {
+                    Some(value) => value,
+                    None => return protocol::error("value is not an integer or out of range"),
+                }
+            } else {
+                1
+            };
+            if requested.unsigned_abs() > 1_000_000 {
+                return protocol::error("count exceeds ReRu limit");
+            }
+            let Some(hash) = hash else {
+                return if command.len() == 2 {
+                    b"$-1\r\n".to_vec()
+                } else {
+                    protocol::array(&[])
+                };
+            };
+            let random = RandomState::new();
+            let mut fields: Vec<_> = hash.keys().collect();
+            fields.sort_unstable_by_key(|field| random.hash_one(field));
+            let selected: Vec<_> = if requested < 0 && !fields.is_empty() {
+                (0..requested.unsigned_abs() as usize)
+                    .map(|index| fields[(random.hash_one(index) as usize) % fields.len()])
+                    .collect()
+            } else {
+                fields.into_iter().take(requested as usize).collect()
+            };
+            if command.len() == 2 {
+                return selected
+                    .first()
+                    .map_or_else(|| b"$-1\r\n".to_vec(), |field| protocol::bulk(field));
+            }
+            let mut values = Vec::new();
+            for field in selected {
+                values.push(field.clone());
+                if command.len() == 4 {
+                    values.push(hash.get(field).unwrap().clone());
+                }
+            }
+            protocol::array(&values)
+        }
         Hgetall | Hkeys | Hvals => {
             let mut fields: Vec<_> = hash.into_iter().flat_map(|hash| hash.iter()).collect();
             fields.sort_unstable_by_key(|(field, _)| *field);
@@ -218,7 +367,7 @@ fn execute_hash(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
             }
             integer(removed)
         }
-        Hset | Hmset | Hsetnx | Hincrby => {
+        Hset | Hmset | Hsetnx | Hincrby | Hincrbyfloat => {
             if matches!(kind, Hsetnx) && hash.is_some_and(|hash| hash.contains_key(&command[2])) {
                 return integer(0);
             }
@@ -237,6 +386,22 @@ fn execute_hash(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
             } else {
                 0
             };
+            let updated_float = if matches!(kind, Hincrbyfloat) {
+                let old = match hash.and_then(|hash| hash.get(&command[2])) {
+                    None => 0.0,
+                    Some(bytes) => match finite_float(bytes) {
+                        Some(value) => value,
+                        None => return protocol::error("hash value is not a float"),
+                    },
+                };
+                let value = old + float_increment;
+                if !value.is_finite() {
+                    return protocol::error("increment would produce NaN or Infinity");
+                }
+                value
+            } else {
+                0.0
+            };
             let entry = entries.entry(key.clone()).or_insert_with(|| Entry {
                 value: Value::Hash(HashMap::new()),
                 expires_at: None,
@@ -247,6 +412,14 @@ fn execute_hash(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
             let response = if matches!(kind, Hincrby) {
                 hash.insert(command[2].clone(), updated_number.to_string().into_bytes());
                 integer(updated_number)
+            } else if matches!(kind, Hincrbyfloat) {
+                let bytes = if updated_float == 0.0 {
+                    b"0".to_vec()
+                } else {
+                    updated_float.to_string().into_bytes()
+                };
+                hash.insert(command[2].clone(), bytes.clone());
+                protocol::bulk(&bytes)
             } else {
                 let mut added = 0;
                 for pair in command[2..].as_chunks::<2>().0 {
@@ -392,6 +565,26 @@ fn execute_set(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
     };
     match kind {
         Scard => integer(set.map_or(0, |set| set.len()) as i64),
+        Sscan => {
+            let options = match scan_options(command, false) {
+                Ok(options) => options,
+                Err(error) => return error,
+            };
+            let mut members: Vec<_> = set.into_iter().flat_map(|set| set.iter()).collect();
+            members.sort_unstable();
+            let start = options.cursor.min(members.len());
+            let end = start.saturating_add(options.count).min(members.len());
+            let values: Vec<_> = members[start..end]
+                .iter()
+                .filter(|member| {
+                    options
+                        .pattern
+                        .is_none_or(|pattern| glob_matches(pattern, member))
+                })
+                .map(|member| (*member).clone())
+                .collect();
+            scan_reply(if end == members.len() { 0 } else { end }, &values)
+        }
         Smembers => set.map_or_else(|| protocol::array(&[]), set_array),
         Sismember => integer(i64::from(set.is_some_and(|set| set.contains(&command[2])))),
         Smismember => {

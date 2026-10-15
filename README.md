@@ -36,12 +36,15 @@ count. These memory figures are not the process's actual RAM use.
 - Additional list editing and movement: `RPOP`, `LINDEX`, `LSET`, `LTRIM`,
   `LINSERT`, `LPUSHX`, `RPUSHX`, `LMOVE`, `RPOPLPUSH`, `LPOS`, and `LREM`
 - Cache-oriented string operations: conditional/expiring `SET`, `GETEX`, `GETDEL`,
-  `MGET`, `MSET`, `MSETNX`, `APPEND`, and `STRLEN`
+  `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, legacy set variants,
+  integer increment/decrement variants, `GETRANGE`, and `SETRANGE`
 - Initial `XADD`, `XRANGE`, `XREAD`, and `XLEN` support
-- Hash fields: `HSET`, `HGET`, multi-field operations, enumeration, deletion, and `HINCRBY`
+- Hash fields: `HSET`, `HGET`, multi-field operations, enumeration, deletion,
+  `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, and `HSCAN`
 - Set membership, removal, cardinality, random selection, moves, and
-  `SUNION`/`SINTER`/`SDIFF` with destination storing variants
-- Sorted-set insertion, score/rank lookup, ranges, counts, and removal
+  `SUNION`/`SINTER`/`SDIFF` with destination storing variants; `SSCAN`
+- Sorted-set insertion, score/rank lookup, score bounded ranges, counts,
+  range removal, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, and `ZPOPMAX`
 - Bitmap operations on strings: `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, and `BITPOS`
 - Optional memory limit with OOM rejection and ten maxmemory policies
 - `CONFIG GET/SET` for `maxmemory` and `maxmemory-policy`
@@ -55,7 +58,7 @@ count. These memory figures are not the process's actual RAM use.
 - Optional append-only persistence with restart and partial-tail recovery;
   `EXPIREAT` and `PEXPIREAT` for absolute key expiry
 
-110 public command names are supported, with limitations documented in the
+132 public command names are supported, with limitations documented in the
 [compatibility status](docs/COMPATIBILITY.md). ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 

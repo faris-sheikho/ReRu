@@ -11,6 +11,15 @@ enum Command {
     MSetNx,
     Append,
     StrLen,
+    SetNx,
+    SetEx,
+    PSetEx,
+    GetSet,
+    IncrBy,
+    Decr,
+    DecrBy,
+    GetRange,
+    SetRange,
 }
 
 fn parse(name: &[u8]) -> Option<Command> {
@@ -24,6 +33,15 @@ fn parse(name: &[u8]) -> Option<Command> {
         (b"MSETNX", MSetNx),
         (b"APPEND", Append),
         (b"STRLEN", StrLen),
+        (b"SETNX", SetNx),
+        (b"SETEX", SetEx),
+        (b"PSETEX", PSetEx),
+        (b"GETSET", GetSet),
+        (b"INCRBY", IncrBy),
+        (b"DECR", Decr),
+        (b"DECRBY", DecrBy),
+        (b"GETRANGE", GetRange),
+        (b"SETRANGE", SetRange),
     ]
     .iter()
     .find(|(candidate, _)| name.eq_ignore_ascii_case(candidate))
@@ -38,6 +56,11 @@ pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
         Command::MGet => command.len() >= 2,
         Command::MSet | Command::MSetNx => command.len() >= 3 && command.len() % 2 == 1,
         Command::Append => command.len() == 3,
+        Command::SetNx | Command::GetSet | Command::IncrBy | Command::DecrBy => command.len() == 3,
+        Command::SetEx | Command::PSetEx | Command::GetRange | Command::SetRange => {
+            command.len() == 4
+        }
+        Command::Decr => command.len() == 2,
     })
 }
 
@@ -45,7 +68,19 @@ pub fn is_mutating(command: &[Vec<u8>]) -> bool {
     parse(&command[0]).is_some_and(|kind| {
         matches!(
             kind,
-            Command::Set | Command::GetDel | Command::MSet | Command::MSetNx | Command::Append
+            Command::Set
+                | Command::GetDel
+                | Command::MSet
+                | Command::MSetNx
+                | Command::Append
+                | Command::SetNx
+                | Command::SetEx
+                | Command::PSetEx
+                | Command::GetSet
+                | Command::IncrBy
+                | Command::Decr
+                | Command::DecrBy
+                | Command::SetRange
         ) || matches!(kind, Command::GetEx) && command.len() > 2
     })
 }
@@ -288,6 +323,179 @@ fn execute_multi(command: &[Vec<u8>], store: &Store, only_if_all_missing: bool) 
     }
 }
 
+fn legacy_set(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
+    let mut args = vec![b"SET".to_vec(), command[1].clone()];
+    match kind {
+        Command::SetNx => {
+            args.push(command[2].clone());
+            args.push(b"NX".to_vec());
+        }
+        Command::GetSet => {
+            args.push(command[2].clone());
+            args.push(b"GET".to_vec());
+        }
+        Command::SetEx | Command::PSetEx => {
+            let (unit, name) = if matches!(kind, Command::SetEx) {
+                (b"EX".as_slice(), "setex")
+            } else {
+                (b"PX".as_slice(), "psetex")
+            };
+            if let Err(error) = deadline(unit, &command[2], name) {
+                return error;
+            }
+            args.push(command[3].clone());
+            args.push(unit.to_vec());
+            args.push(command[2].clone());
+        }
+        _ => unreachable!(),
+    }
+    let reply = set(&args, store);
+    if matches!(kind, Command::SetNx) {
+        if reply == b"+OK\r\n" {
+            b":1\r\n".to_vec()
+        } else if reply == b"$-1\r\n" {
+            b":0\r\n".to_vec()
+        } else {
+            reply
+        }
+    } else {
+        reply
+    }
+}
+
+fn change_integer(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> {
+    let amount = if matches!(kind, Command::Decr) {
+        1
+    } else {
+        match std::str::from_utf8(&command[2])
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            Some(value) => value,
+            None => return protocol::error("value is not an integer or out of range"),
+        }
+    };
+    let key = &command[1];
+    let mut entries = store.entries.lock().unwrap();
+    remove_expired(&mut entries, key);
+    let old = match entries.get(key).map(|entry| &entry.value) {
+        Some(Value::String(value)) => match std::str::from_utf8(value)
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            Some(value) => value,
+            None => return protocol::error("value is not an integer or out of range"),
+        },
+        Some(_) => return wrong_type(),
+        None => 0,
+    };
+    let next = if matches!(kind, Command::IncrBy) {
+        old.checked_add(amount)
+    } else {
+        old.checked_sub(amount)
+    };
+    let Some(next) = next else {
+        return protocol::error("increment or decrement would overflow");
+    };
+    let entry = entries.entry(key.clone()).or_insert_with(|| Entry {
+        value: Value::String(Vec::new()),
+        expires_at: None,
+    });
+    let Value::String(value) = &mut entry.value else {
+        unreachable!();
+    };
+    *value = next.to_string().into_bytes();
+    mark_modified(store, key);
+    format!(":{next}\r\n").into_bytes()
+}
+
+fn range_index(index: i64, len: i128) -> i128 {
+    if index < 0 {
+        len + i128::from(index)
+    } else {
+        i128::from(index)
+    }
+}
+
+fn getrange(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
+    let parse = |value: &[u8]| {
+        std::str::from_utf8(value)
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .ok_or_else(|| protocol::error("value is not an integer or out of range"))
+    };
+    let start = match parse(&command[2]) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let end = match parse(&command[3]) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let mut entries = store.entries.lock().unwrap();
+    remove_expired(&mut entries, &command[1]);
+    let bytes = match entries.get(&command[1]).map(|entry| &entry.value) {
+        Some(Value::String(value)) => value.as_slice(),
+        Some(_) => return wrong_type(),
+        None => return protocol::bulk(b""),
+    };
+    let len = bytes.len() as i128;
+    let from = range_index(start, len).max(0).min(len) as usize;
+    let to = range_index(end, len).max(-1).min(len - 1);
+    if to < from as i128 {
+        protocol::bulk(b"")
+    } else {
+        protocol::bulk(&bytes[from..=to as usize])
+    }
+}
+
+fn setrange(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
+    let offset = match std::str::from_utf8(&command[2])
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        Some(offset) => offset,
+        None => return protocol::error("value is not an integer or out of range"),
+    };
+    let key = &command[1];
+    let mut entries = store.entries.lock().unwrap();
+    remove_expired(&mut entries, key);
+    if entries
+        .get(key)
+        .is_some_and(|entry| !matches!(entry.value, Value::String(_)))
+    {
+        return wrong_type();
+    }
+    if command[3].is_empty() {
+        return format!(
+            ":{}\r\n",
+            entries.get(key).map_or(0, |entry| match &entry.value {
+                Value::String(value) => value.len(),
+                _ => unreachable!(),
+            })
+        )
+        .into_bytes();
+    }
+    let Some(end) = offset.checked_add(command[3].len()) else {
+        return protocol::error("string exceeds ReRu 64 MiB limit");
+    };
+    if end > 64 * 1024 * 1024 {
+        return protocol::error("string exceeds ReRu 64 MiB limit");
+    }
+    let entry = entries.entry(key.clone()).or_insert_with(|| Entry {
+        value: Value::String(Vec::new()),
+        expires_at: None,
+    });
+    let Value::String(value) = &mut entry.value else {
+        unreachable!();
+    };
+    value.resize(value.len().max(end), 0);
+    value[offset..end].copy_from_slice(&command[3]);
+    let length = value.len();
+    mark_modified(store, key);
+    format!(":{length}\r\n").into_bytes()
+}
+
 pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
     let kind = parse(&command[0])?;
     if valid_arity(command) == Some(false) {
@@ -298,6 +506,12 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
     }
     Some(match kind {
         Command::Set => set(command, store),
+        Command::SetNx | Command::SetEx | Command::PSetEx | Command::GetSet => {
+            legacy_set(kind, command, store)
+        }
+        Command::IncrBy | Command::Decr | Command::DecrBy => change_integer(kind, command, store),
+        Command::GetRange => getrange(command, store),
+        Command::SetRange => setrange(command, store),
         Command::MSet => execute_multi(command, store, false),
         Command::MSetNx => execute_multi(command, store, true),
         Command::MGet => {

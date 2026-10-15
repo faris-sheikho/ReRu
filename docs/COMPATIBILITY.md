@@ -1,6 +1,6 @@
 # ReRu compatibility status
 
-Updated: 14 October 2026. This inventory describes the implementation and local
+Updated: 15 October 2026. This inventory describes the implementation and local
 tests; it does not certify complete compatibility with Redis.
 
 ## Implemented commands
@@ -8,12 +8,12 @@ tests; it does not certify complete compatibility with Redis.
 | Area | Commands | Current scope |
 | --- | --- | --- |
 | Connection | `PING`, `ECHO` | PING with an optional message; RESP2 requests/replies |
-| Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access |
+| Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `INCRBY`, `DECR`, `DECRBY`, `GETRANGE`, `SETRANGE` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access, integer arithmetic and byte ranges |
 | Lists | `RPUSH`, `LPUSH`, `LPUSHX`, `RPUSHX`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LREM`, `LPOS`, `LPOP`, `RPOP`, `RPOPLPUSH`, `LMOVE`, `BLPOP` | Multiple elements, negative indexes, edits, moves, position search, blocking left-pop with timeout |
 | Streams | `XADD`, `XRANGE`, `XREAD`, `XLEN` | Entry IDs, ranges and blocking reads; no consumer groups |
-| Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HINCRBY` | Binary fields/values, multiple field updates, missing-field nil replies, signed 64-bit increments |
-| Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE` | Binary members, deduplication, membership, cardinality, random selection, atomic moves and set algebra with destination replacement |
-| Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZCOUNT`, `ZREM` | Score-ordered members, rank/index ranges, ZADD NX/XX/GT/LT/CH/INCR |
+| Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, `HSCAN` | Binary fields/values, multiple field updates, missing-field nil replies, increments, random fields and cursor iteration |
+| Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `SSCAN` | Binary members, deduplication, membership, cardinality, random selection, atomic moves, set algebra and cursor iteration |
+| Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZCOUNT`, `ZREM`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, `ZPOPMAX` | Score-ordered members, rank and score ranges, ZADD NX/XX/GT/LT/CH/INCR, cursor iteration, range removal and ordered popping |
 | Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT |
 | Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `KEYS`, `SCAN`, `RANDOMKEY`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST` | Multiple keys, glob and type filtered scanning, rename/copy with TTL, relative/absolute expiry conditions |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
@@ -22,7 +22,7 @@ tests; it does not certify complete compatibility with Redis.
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 | Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
 
-Total: **110 public command names**. Supporting a command name does not mean that
+Total: **132 public command names**. Supporting a command name does not mean that
 every Redis option for that command is implemented.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
@@ -39,6 +39,12 @@ as unspecified. HMSET is supported for older clients; prefer HSET for new code.
 `SPOP` and `SRANDMEMBER` use a randomized member order; count replies are capped
 at one million elements to bound allocation. Set store variants replace the
 destination and clear its previous TTL.
+`HRANDFIELD` uses the same one-million count cap. `HINCRBYFLOAT` uses Rust `f64`
+arithmetic, so last-digit results can differ from Redis long-double arithmetic.
+`HSCAN`, `SSCAN`, and `ZSCAN` currently use sorted offset cursors, rebuilding
+their index for each call. They apply `MATCH` after page selection and accept
+`COUNT` as a page size; concurrent edits may repeat or skip elements. `HSCAN`
+supports `NOVALUES`. `SETRANGE` currently caps growth at 64 MiB.
 
 ## Memory limit and eviction
 
@@ -79,8 +85,8 @@ to the keyspace during a scan can shift the index and repeat or skip keys.
 Sorted sets keep a member lookup map and a score-ordered index. Score changes
 update both indexes. Rank lookup is still linear in the number of members;
 range scans advance through the ordered index. `ZRANGE` supports rank indexes,
-`REV`, and `WITHSCORES`; `BYSCORE`, `BYLEX`, `LIMIT`, and newer sorted-set
-commands remain. Bitmap growth is capped at 64 MiB per value, below Redis's
+`BYSCORE`, `REV`, `WITHSCORES`, and `LIMIT` with score ranges; `BYLEX` and newer
+sorted-set commands remain. Bitmap growth is capped at 64 MiB per value, below Redis's
 maximum; this is an explicit ReRu resource limit. `BITFIELD` is not available.
 Strings and bitmaps share the same underlying value type.
 
@@ -122,7 +128,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **115 tests**: 9 unit tests and 106 server integration tests.
+The local suite has **124 tests**: 9 unit tests and 115 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,

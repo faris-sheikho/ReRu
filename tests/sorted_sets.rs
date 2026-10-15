@@ -10,6 +10,156 @@ fn values(bytes: &[&[u8]]) -> Reply {
     array(bytes.iter().map(|value| bulk(value)).collect())
 }
 
+fn scan_page(reply: Reply) -> (Vec<u8>, Vec<Reply>) {
+    let Reply::Array(Some(mut parts)) = reply else {
+        panic!("expected two-part scan reply");
+    };
+    assert_eq!(parts.len(), 2);
+    let Reply::Bulk(Some(cursor)) = parts.remove(0) else {
+        panic!("expected cursor bulk string");
+    };
+    let Reply::Array(Some(values)) = parts.remove(0) else {
+        panic!("expected scan members");
+    };
+    (cursor, values)
+}
+
+#[test]
+fn sorted_set_scan_and_multi_score_handle_missing_members_and_binary_names() {
+    let server = common::Server::start();
+    let mut c = Client::new(&server);
+    assert_eq!(
+        c.call(&[b"ZMSCORE", b"missing", b"a"]),
+        array(vec![Reply::Bulk(None)])
+    );
+    assert_eq!(
+        c.call(&[b"ZADD", b"z", b"3", b"c", b"1", b"a", b"2", b"b\0"]),
+        integer(3)
+    );
+    assert_eq!(
+        c.call(&[b"ZMSCORE", b"z", b"b\0", b"none", b"a"]),
+        array(vec![bulk(b"2"), Reply::Bulk(None), bulk(b"1")])
+    );
+    let (cursor, values) =
+        scan_page(c.call(&[b"ZSCAN", b"z", b"0", b"COUNT", b"1", b"MATCH", b"b*"]));
+    assert_eq!(cursor, b"1");
+    assert!(values.is_empty());
+    let (cursor, values) =
+        scan_page(c.call(&[b"ZSCAN", b"z", &cursor, b"COUNT", b"2", b"MATCH", b"b*"]));
+    assert_eq!(cursor, b"0");
+    assert_eq!(values, vec![bulk(b"b\0"), bulk(b"2")]);
+    assert!(matches!(
+        c.call(&[b"ZSCAN", b"z", b"oops"]),
+        Reply::Error(_)
+    ));
+    assert!(matches!(
+        c.call(&[b"ZSCAN", b"z", b"0", b"COUNT", b"0"]),
+        Reply::Error(_)
+    ));
+}
+
+#[test]
+fn sorted_set_pop_orders_scores_removes_empty_key_and_retains_expiry() {
+    let server = common::Server::start();
+    let mut c = Client::new(&server);
+    assert_eq!(c.call(&[b"ZPOPMIN", b"missing"]), array(vec![]));
+    assert_eq!(
+        c.call(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"2", b"c"]),
+        integer(3)
+    );
+    assert_eq!(c.call(&[b"PEXPIRE", b"z", b"60000"]), integer(1));
+    assert_eq!(
+        c.call(&[b"ZPOPMAX", b"z", b"2"]),
+        values(&[b"c", b"2", b"b", b"2"])
+    );
+    assert_eq!(c.call(&[b"ZCARD", b"z"]), integer(1));
+    assert!(matches!(c.call(&[b"PTTL", b"z"]), Reply::Integer(value) if value > 0));
+    assert_eq!(c.call(&[b"ZPOPMIN", b"z"]), values(&[b"a", b"1"]));
+    assert_eq!(c.call(&[b"TYPE", b"z"]), Reply::Simple(b"none".to_vec()));
+    assert!(matches!(
+        c.call(&[b"ZPOPMAX", b"z", b"-1"]),
+        Reply::Error(_)
+    ));
+}
+
+#[test]
+fn score_range_supports_exclusive_bounds_reverse_and_pagination() {
+    let server = common::Server::start();
+    let mut c = Client::new(&server);
+    assert_eq!(
+        c.call(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"2", b"c", b"3", b"d"]),
+        integer(4)
+    );
+    assert_eq!(
+        c.call(&[b"ZRANGE", b"z", b"(1", b"3", b"BYSCORE"]),
+        values(&[b"b", b"c", b"d"])
+    );
+    assert_eq!(
+        c.call(&[
+            b"ZRANGE",
+            b"z",
+            b"3",
+            b"(1",
+            b"BYSCORE",
+            b"REV",
+            b"LIMIT",
+            b"1",
+            b"1",
+            b"WITHSCORES"
+        ]),
+        values(&[b"c", b"2"])
+    );
+    assert_eq!(
+        c.call(&[b"ZRANGEBYSCORE", b"z", b"-inf", b"2", b"LIMIT", b"1", b"2"]),
+        values(&[b"b", b"c"])
+    );
+    assert_eq!(
+        c.call(&[b"ZREVRANGEBYSCORE", b"z", b"+inf", b"(1", b"WITHSCORES"]),
+        values(&[b"d", b"3", b"c", b"2", b"b", b"2"])
+    );
+    assert_eq!(
+        c.call(&[b"ZRANGE", b"z", b"0", b"-1"]),
+        values(&[b"a", b"b", b"c", b"d"])
+    );
+    assert!(matches!(
+        c.call(&[b"ZRANGE", b"z", b"0", b"-1", b"LIMIT", b"0", b"1"]),
+        Reply::Error(_)
+    ));
+}
+
+#[test]
+fn sorted_set_range_removal_updates_indexes_and_deletes_empty_key() {
+    let server = common::Server::start();
+    let mut c = Client::new(&server);
+    assert_eq!(
+        c.call(&[b"ZADD", b"z", b"1", b"a", b"2", b"b", b"2", b"c", b"3", b"d"]),
+        integer(4)
+    );
+    assert_eq!(
+        c.call(&[b"ZREMRANGEBYSCORE", b"z", b"(1", b"2"]),
+        integer(2)
+    );
+    assert_eq!(
+        c.call(&[b"ZRANGE", b"z", b"0", b"-1"]),
+        values(&[b"a", b"d"])
+    );
+    assert_eq!(
+        c.call(&[b"ZREMRANGEBYRANK", b"z", b"-1", b"-1"]),
+        integer(1)
+    );
+    assert_eq!(c.call(&[b"ZSCORE", b"z", b"d"]), Reply::Bulk(None));
+    assert_eq!(c.call(&[b"ZREMRANGEBYRANK", b"z", b"0", b"-1"]), integer(1));
+    assert_eq!(c.call(&[b"TYPE", b"z"]), Reply::Simple(b"none".to_vec()));
+    assert_eq!(
+        c.call(&[b"ZREMRANGEBYSCORE", b"missing", b"-inf", b"+inf"]),
+        integer(0)
+    );
+    assert!(matches!(
+        c.call(&[b"ZREMRANGEBYRANK", b"missing", b"bad", b"1"]),
+        Reply::Error(_)
+    ));
+}
+
 #[test]
 fn score_order_uses_binary_member_ties_and_negative_indexes() {
     let server = common::Server::start();
