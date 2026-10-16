@@ -32,6 +32,9 @@ fn representative_resp2_sequences_match_a_real_redis_server() {
         b"reru-diff:stream",
         b"reru-diff:copy",
         b"reru-diff:bitfield",
+        b"reru-diff:zalg-a",
+        b"reru-diff:zalg-b",
+        b"reru-diff:zalg-out",
     ];
     let mut reset = vec![b"DEL".as_slice()];
     reset.extend(keys);
@@ -189,6 +192,77 @@ fn representative_resp2_sequences_match_a_real_redis_server() {
         ],
         &[b"ZREMRANGEBYLEX", b"reru-diff:zlex", b"[b", b"+"],
         &[b"ZRANGE", b"reru-diff:zlex", b"0", b"-1"],
+    ] {
+        compare(&mut ours, &mut redis, command);
+    }
+
+    for command in [
+        &[
+            b"ZADD".as_slice(),
+            b"reru-diff:zalg-a",
+            b"1",
+            b"one",
+            b"2",
+            b"two",
+        ] as &[&[u8]],
+        &[b"ZADD", b"reru-diff:zalg-b", b"3", b"one", b"4", b"three"],
+        &[
+            b"ZUNION",
+            b"2",
+            b"reru-diff:zalg-a",
+            b"reru-diff:zalg-b",
+            b"WITHSCORES",
+        ],
+        &[
+            b"ZUNION",
+            b"2",
+            b"reru-diff:zalg-a",
+            b"reru-diff:set",
+            b"WITHSCORES",
+        ],
+        &[
+            b"ZINTER",
+            b"2",
+            b"reru-diff:zalg-a",
+            b"reru-diff:zalg-b",
+            b"WEIGHTS",
+            b"2",
+            b"3",
+            b"AGGREGATE",
+            b"MAX",
+            b"WITHSCORES",
+        ],
+        &[b"ZDIFF", b"2", b"reru-diff:zalg-a", b"reru-diff:zalg-b"],
+        &[
+            b"ZINTERCARD",
+            b"2",
+            b"reru-diff:zalg-a",
+            b"reru-diff:zalg-b",
+            b"LIMIT",
+            b"1",
+        ],
+        &[
+            b"ZUNIONSTORE",
+            b"reru-diff:zalg-out",
+            b"2",
+            b"reru-diff:zalg-a",
+            b"reru-diff:zalg-b",
+        ],
+        &[b"ZRANGE", b"reru-diff:zalg-out", b"0", b"-1", b"WITHSCORES"],
+        &[
+            b"ZINTERSTORE",
+            b"reru-diff:zalg-out",
+            b"2",
+            b"reru-diff:zalg-a",
+            b"reru-diff:zalg-b",
+        ],
+        &[
+            b"ZDIFFSTORE",
+            b"reru-diff:zalg-out",
+            b"2",
+            b"reru-diff:zalg-a",
+            b"reru-diff:zalg-b",
+        ],
     ] {
         compare(&mut ours, &mut redis, command);
     }

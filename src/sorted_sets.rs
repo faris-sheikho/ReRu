@@ -2,6 +2,8 @@ use crate::{mark_modified, protocol, pubsub::glob_matches, remove_expired, Entry
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
+mod algebra;
+
 #[derive(Clone)]
 struct ScoredMember {
     score: f64,
@@ -136,6 +138,13 @@ enum Command {
     Scan,
     PopMin,
     PopMax,
+    Union,
+    UnionStore,
+    Intersect,
+    IntersectStore,
+    Difference,
+    DifferenceStore,
+    IntersectCard,
 }
 
 fn parse(name: &[u8]) -> Option<Command> {
@@ -163,6 +172,13 @@ fn parse(name: &[u8]) -> Option<Command> {
         (b"ZSCAN", Scan),
         (b"ZPOPMIN", PopMin),
         (b"ZPOPMAX", PopMax),
+        (b"ZUNION", Union),
+        (b"ZUNIONSTORE", UnionStore),
+        (b"ZINTER", Intersect),
+        (b"ZINTERSTORE", IntersectStore),
+        (b"ZDIFF", Difference),
+        (b"ZDIFFSTORE", DifferenceStore),
+        (b"ZINTERCARD", IntersectCard),
     ]
     .iter()
     .find(|(candidate, _)| name.eq_ignore_ascii_case(candidate))
@@ -186,6 +202,12 @@ pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
         Command::MultiScore => command.len() >= 3,
         Command::Scan => command.len() >= 3,
         Command::PopMin | Command::PopMax => command.len() == 2 || command.len() == 3,
+        Command::Union | Command::Intersect | Command::Difference | Command::IntersectCard => {
+            command.len() >= 3
+        }
+        Command::UnionStore | Command::IntersectStore | Command::DifferenceStore => {
+            command.len() >= 4
+        }
     })
 }
 
@@ -201,6 +223,9 @@ pub fn is_mutating(command: &[Vec<u8>]) -> bool {
                 | Command::RemoveRangeByLex
                 | Command::PopMin
                 | Command::PopMax
+                | Command::UnionStore
+                | Command::IntersectStore
+                | Command::DifferenceStore
         )
     })
 }
@@ -748,6 +773,18 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
     if matches!(kind, Command::Add | Command::Increment) {
         return Some(add(command, store, matches!(kind, Command::Increment)));
     }
+    if matches!(
+        kind,
+        Command::Union
+            | Command::UnionStore
+            | Command::Intersect
+            | Command::IntersectStore
+            | Command::Difference
+            | Command::DifferenceStore
+            | Command::IntersectCard
+    ) {
+        return Some(algebra::execute(kind, command, store));
+    }
     let key = &command[1];
     let mut entries = store.entries.lock().unwrap();
     remove_expired(&mut entries, key);
@@ -923,6 +960,13 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
             protocol::array(&values)
         }
         Command::Add | Command::Increment => unreachable!(),
+        Command::Union
+        | Command::UnionStore
+        | Command::Intersect
+        | Command::IntersectStore
+        | Command::Difference
+        | Command::DifferenceStore
+        | Command::IntersectCard => unreachable!(),
     })
 }
 

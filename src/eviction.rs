@@ -297,6 +297,29 @@ impl Eviction {
             command[2..command.len().min(2usize.saturating_add(count))]
                 .iter()
                 .collect()
+        } else if [
+            b"ZUNION".as_slice(),
+            b"ZINTER",
+            b"ZDIFF",
+            b"ZINTERCARD",
+            b"ZUNIONSTORE",
+            b"ZINTERSTORE",
+            b"ZDIFFSTORE",
+        ]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        {
+            let stored = name.to_ascii_uppercase().ends_with(b"STORE");
+            let count_at = if stored { 2 } else { 1 };
+            let count = command
+                .get(count_at)
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            let from = count_at + 1;
+            command[from.min(command.len())..command.len().min(from.saturating_add(count))]
+                .iter()
+                .collect()
         } else if name.eq_ignore_ascii_case(b"BITOP") {
             command[2..].iter().collect()
         } else if name.eq_ignore_ascii_case(b"RENAME")
