@@ -18,7 +18,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 enum Value {
@@ -788,6 +788,18 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
         } else {
             protocol::bulk(&command[1])
         }
+    } else if command[0].eq_ignore_ascii_case(b"TIME") {
+        if command.len() != 1 {
+            protocol::error("wrong number of arguments for 'time' command")
+        } else {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            protocol::array(&[
+                now.as_secs().to_string().into_bytes(),
+                now.subsec_micros().to_string().into_bytes(),
+            ])
+        }
     } else if command[0].eq_ignore_ascii_case(b"GET") {
         if command.len() != 2 {
             protocol::error("wrong number of arguments for 'get' command")
@@ -1328,7 +1340,7 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
         valid
     } else if name.eq_ignore_ascii_case(b"INFO") || name.eq_ignore_ascii_case(b"PING") {
         arity <= 2
-    } else if name.eq_ignore_ascii_case(b"UNWATCH") {
+    } else if name.eq_ignore_ascii_case(b"UNWATCH") || name.eq_ignore_ascii_case(b"TIME") {
         arity == 1
     } else if name.eq_ignore_ascii_case(b"ECHO")
         || name.eq_ignore_ascii_case(b"GET")

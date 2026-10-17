@@ -38,7 +38,8 @@ count. These memory figures are not the process's actual RAM use.
   `BRPOPLPUSH`, `LMPOP`, `BLMPOP`, `LPOS`, and `LREM`
 - Cache-oriented string operations: conditional/expiring `SET`, `GETEX`, `GETDEL`,
   `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, legacy set variants,
-  integer increment/decrement variants, `GETRANGE`, and `SETRANGE`
+  integer and floating-point increments, `GETRANGE`, `SUBSTR`, and `SETRANGE`
+- `TIME` returns server epoch seconds and microseconds
 - Initial `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, and exact `XTRIM` support
 - Hash fields: `HSET`, `HGET`, multi-field operations, enumeration, deletion,
   `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, and `HSCAN`
@@ -61,8 +62,8 @@ count. These memory figures are not the process's actual RAM use.
 - Optional append-only persistence with restart and partial-tail recovery;
   `EXPIREAT` and `PEXPIREAT` for absolute key expiry
 
-155 Redis command metadata entries have an implementation path, with limitations
-documented in the [compatibility status](docs/COMPATIBILITY.md). This is 33.8%
+158 Redis command metadata entries have an implementation path, with limitations
+documented in the [compatibility status](docs/COMPATIBILITY.md). This is 34.4%
 of the 459 entries in the pinned Redis 8.10.2 command metadata, **not** a
 Redis compatibility percentage. ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.

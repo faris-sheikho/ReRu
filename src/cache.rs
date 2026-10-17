@@ -16,9 +16,11 @@ enum Command {
     PSetEx,
     GetSet,
     IncrBy,
+    IncrByFloat,
     Decr,
     DecrBy,
     GetRange,
+    SubStr,
     SetRange,
 }
 
@@ -38,9 +40,11 @@ fn parse(name: &[u8]) -> Option<Command> {
         (b"PSETEX", PSetEx),
         (b"GETSET", GetSet),
         (b"INCRBY", IncrBy),
+        (b"INCRBYFLOAT", IncrByFloat),
         (b"DECR", Decr),
         (b"DECRBY", DecrBy),
         (b"GETRANGE", GetRange),
+        (b"SUBSTR", SubStr),
         (b"SETRANGE", SetRange),
     ]
     .iter()
@@ -56,10 +60,16 @@ pub fn valid_arity(command: &[Vec<u8>]) -> Option<bool> {
         Command::MGet => command.len() >= 2,
         Command::MSet | Command::MSetNx => command.len() >= 3 && command.len() % 2 == 1,
         Command::Append => command.len() == 3,
-        Command::SetNx | Command::GetSet | Command::IncrBy | Command::DecrBy => command.len() == 3,
-        Command::SetEx | Command::PSetEx | Command::GetRange | Command::SetRange => {
-            command.len() == 4
-        }
+        Command::SetNx
+        | Command::GetSet
+        | Command::IncrBy
+        | Command::IncrByFloat
+        | Command::DecrBy => command.len() == 3,
+        Command::SetEx
+        | Command::PSetEx
+        | Command::GetRange
+        | Command::SubStr
+        | Command::SetRange => command.len() == 4,
         Command::Decr => command.len() == 2,
     })
 }
@@ -78,6 +88,7 @@ pub fn is_mutating(command: &[Vec<u8>]) -> bool {
                 | Command::PSetEx
                 | Command::GetSet
                 | Command::IncrBy
+                | Command::IncrByFloat
                 | Command::Decr
                 | Command::DecrBy
                 | Command::SetRange
@@ -409,6 +420,50 @@ fn change_integer(kind: Command, command: &[Vec<u8>], store: &Store) -> Vec<u8> 
     format!(":{next}\r\n").into_bytes()
 }
 
+fn finite_float(bytes: &[u8]) -> Option<f64> {
+    std::str::from_utf8(bytes)
+        .ok()?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+fn change_float(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
+    let Some(amount) = finite_float(&command[2]) else {
+        return protocol::error("value is not a valid float");
+    };
+    let key = &command[1];
+    let mut entries = store.entries.lock().unwrap();
+    remove_expired(&mut entries, key);
+    let old = match entries.get(key).map(|entry| &entry.value) {
+        Some(Value::String(value)) => match finite_float(value) {
+            Some(value) => value,
+            None => return protocol::error("value is not a valid float"),
+        },
+        Some(_) => return wrong_type(),
+        None => 0.0,
+    };
+    let next = old + amount;
+    if !next.is_finite() {
+        return protocol::error("increment would produce NaN or Infinity");
+    }
+    let bytes = if next == 0.0 {
+        b"0".to_vec()
+    } else {
+        next.to_string().into_bytes()
+    };
+    let entry = entries.entry(key.clone()).or_insert_with(|| Entry {
+        value: Value::String(Vec::new()),
+        expires_at: None,
+    });
+    let Value::String(value) = &mut entry.value else {
+        unreachable!();
+    };
+    *value = bytes.clone();
+    mark_modified(store, key);
+    protocol::bulk(&bytes)
+}
+
 fn range_index(index: i64, len: i128) -> i128 {
     if index < 0 {
         len + i128::from(index)
@@ -510,7 +565,8 @@ pub fn execute(command: &[Vec<u8>], store: &Store) -> Option<Vec<u8>> {
             legacy_set(kind, command, store)
         }
         Command::IncrBy | Command::Decr | Command::DecrBy => change_integer(kind, command, store),
-        Command::GetRange => getrange(command, store),
+        Command::IncrByFloat => change_float(command, store),
+        Command::GetRange | Command::SubStr => getrange(command, store),
         Command::SetRange => setrange(command, store),
         Command::MSet => execute_multi(command, store, false),
         Command::MSetNx => execute_multi(command, store, true),

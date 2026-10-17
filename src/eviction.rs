@@ -355,6 +355,7 @@ impl Eviction {
             command[1..command.len() - 1].iter().collect()
         } else if name.eq_ignore_ascii_case(b"PING")
             || name.eq_ignore_ascii_case(b"ECHO")
+            || name.eq_ignore_ascii_case(b"TIME")
             || name.eq_ignore_ascii_case(b"CONFIG")
         {
             Vec::new()

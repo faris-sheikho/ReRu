@@ -9,11 +9,12 @@ partial INFO memory/stats, keyspace and collection scans, and expiry inspection 
 ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
 local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
-The latest increment adds blocking list moves and multi-key pops. Earlier
-increments added stream deletion/trimming/reverse ranges, set intersection
+The latest increment adds floating-point string increments, the legacy SUBSTR
+alias, and server TIME. Earlier increments added blocking list moves and
+multi-key pops, stream deletion/trimming/reverse ranges, set intersection
 cardinality, sorted-set lex ranges, bitfields and sorted-set algebra. A small
-differential suite has passed against Redis 7.0.15, including these list
-operations; testing against the pinned version and
+differential suite has passed against Redis 7.0.15, including these string and
+list operations; testing against the pinned version and
 across every supported option remains pending.
 Redis 8.10.2 is the pinned compatibility reference. The current Rust code uses
 upstream documentation for behavior; a direct source-translation license has
@@ -27,7 +28,7 @@ not been selected.
 - Compare observable behavior against a real Redis server and keep regression
   tests for every command before marking it complete.
 - Track command-name presence separately from verified behavior and subsystem
-  coverage. The current 155/459 metadata entries (33.8%) do not establish
+  coverage. The current 158/459 metadata entries (34.4%) do not establish
   30–40% implementation of Redis.
 - Keep the server usable after every small, tested commit.
 

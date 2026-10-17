@@ -2,10 +2,77 @@
 mod client;
 mod common;
 use client::{array, integer, ok, queued, Client, Reply};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn bulk(value: &[u8]) -> Reply {
     Reply::Bulk(Some(value.to_vec()))
+}
+
+#[test]
+fn floating_increment_and_substr_preserve_redis_string_behavior() {
+    let server = common::Server::start();
+    let mut c = Client::new(&server);
+    assert_eq!(c.call(&[b"INCRBYFLOAT", b"amount", b"10.5"]), bulk(b"10.5"));
+    assert_eq!(c.call(&[b"INCRBYFLOAT", b"amount", b"0.1"]), bulk(b"10.6"));
+    assert_eq!(c.call(&[b"GET", b"amount"]), bulk(b"10.6"));
+    assert_eq!(c.call(&[b"SUBSTR", b"amount", b"-3", b"-1"]), bulk(b"0.6"));
+    assert_eq!(c.call(&[b"SUBSTR", b"missing", b"0", b"-1"]), bulk(b""));
+    assert_eq!(c.call(&[b"SET", b"amount", b"5e3", b"EX", b"60"]), ok());
+    assert_eq!(c.call(&[b"INCRBYFLOAT", b"amount", b"2e2"]), bulk(b"5200"));
+    assert!(matches!(c.call(&[b"TTL", b"amount"]), Reply::Integer(ttl) if ttl > 0));
+    assert_eq!(c.call(&[b"SET", b"amount", b"1e308"]), ok());
+    assert!(matches!(
+        c.call(&[b"INCRBYFLOAT", b"amount", b"1e308"]),
+        Reply::Error(_)
+    ));
+    assert_eq!(c.call(&[b"GET", b"amount"]), bulk(b"1e308"));
+    assert!(matches!(
+        c.call(&[b"INCRBYFLOAT", b"amount", b"nan"]),
+        Reply::Error(_)
+    ));
+    assert_eq!(c.call(&[b"RPUSH", b"list", b"a"]), integer(1));
+    assert!(matches!(
+        c.call(&[b"INCRBYFLOAT", b"list", b"1"]),
+        Reply::Error(_)
+    ));
+    assert!(matches!(
+        c.call(&[b"SUBSTR", b"list", b"0", b"1"]),
+        Reply::Error(_)
+    ));
+    assert_eq!(c.call(&[b"MULTI"]), ok());
+    assert_eq!(c.call(&[b"INCRBYFLOAT", b"fresh", b"0.5"]), queued());
+    assert_eq!(c.call(&[b"SUBSTR", b"fresh", b"0", b"-1"]), queued());
+    assert_eq!(c.call(&[b"EXEC"]), array(vec![bulk(b"0.5"), bulk(b"0.5")]));
+}
+
+#[test]
+fn time_returns_current_epoch_seconds_and_microseconds() {
+    let server = common::Server::start();
+    let mut c = Client::new(&server);
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let reply = c.call(&[b"TIME"]);
+    let after = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let Reply::Array(Some(parts)) = reply else {
+        panic!("TIME must return two bulk strings");
+    };
+    assert_eq!(parts.len(), 2);
+    let Reply::Bulk(Some(seconds)) = &parts[0] else {
+        panic!("seconds must be a bulk string")
+    };
+    let Reply::Bulk(Some(micros)) = &parts[1] else {
+        panic!("microseconds must be a bulk string")
+    };
+    let seconds: u64 = std::str::from_utf8(seconds).unwrap().parse().unwrap();
+    let micros: u32 = std::str::from_utf8(micros).unwrap().parse().unwrap();
+    assert!((before..=after).contains(&seconds));
+    assert!(micros < 1_000_000);
+    assert!(matches!(c.call(&[b"TIME", b"extra"]), Reply::Error(_)));
 }
 
 #[test]

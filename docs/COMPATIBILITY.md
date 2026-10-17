@@ -8,7 +8,7 @@ tests; it does not certify complete compatibility with Redis.
 | Area | Commands | Current scope |
 | --- | --- | --- |
 | Connection | `PING`, `ECHO` | PING with an optional message; RESP2 requests/replies |
-| Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `INCRBY`, `DECR`, `DECRBY`, `GETRANGE`, `SETRANGE` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access, integer arithmetic and byte ranges |
+| Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `INCRBY`, `INCRBYFLOAT`, `DECR`, `DECRBY`, `GETRANGE`, `SUBSTR`, `SETRANGE` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access, numeric arithmetic and byte ranges |
 | Lists | `RPUSH`, `LPUSH`, `LPUSHX`, `RPUSHX`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LREM`, `LPOS`, `LPOP`, `RPOP`, `RPOPLPUSH`, `LMOVE`, `BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, `LMPOP`, `BLMPOP` | Multiple elements, negative indexes, edits, moves, position search, single/multi-key blocking pops and moves with timeout |
 | Streams | `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, `XTRIM` | Entry IDs, forward/reverse ranges, deletion, exact MAXLEN/MINID trimming and blocking reads; no consumer groups |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, `HSCAN` | Binary fields/values, multiple field updates, missing-field nil replies, increments, random fields and cursor iteration |
@@ -21,8 +21,9 @@ tests; it does not certify complete compatibility with Redis.
 | Connection close | `QUIT` | Replies OK and closes the connection |
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 | Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
+| Server time | `TIME` | Epoch seconds and microseconds as RESP2 bulk strings |
 
-Total: **155 Redis command metadata entries**, or **33.8% name presence**
+Total: **158 Redis command metadata entries**, or **34.4% name presence**
 against 459 entries in the pinned Redis 8.10.2 metadata. This is neither a
 behavior pass rate nor a percentage of Redis completed. Run
 `powershell -File scripts/command_coverage.ps1 -RedisSource PATH_TO_REDIS_8_10_2`
@@ -51,6 +52,8 @@ at one million elements to bound allocation. Set store variants replace the
 destination and clear its previous TTL.
 `HRANDFIELD` uses the same one-million count cap. `HINCRBYFLOAT` uses Rust `f64`
 arithmetic, so last-digit results can differ from Redis long-double arithmetic.
+`INCRBYFLOAT` has the same precision limitation. Both reject nonfinite input
+and overflow without changing the stored value.
 `HSCAN`, `SSCAN`, and `ZSCAN` currently use sorted offset cursors, rebuilding
 their index for each call. They apply `MATCH` after page selection and accept
 `COUNT` as a page size; concurrent edits may repeat or skip elements. `HSCAN`
@@ -154,7 +157,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **138 tests**: 10 unit tests and 128 server integration tests.
+The local suite has **140 tests**: 10 unit tests and 130 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,
