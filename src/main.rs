@@ -3,6 +3,7 @@ mod bitmaps;
 mod cache;
 mod collections;
 mod eviction;
+mod geo;
 mod keyspace;
 mod list_ops;
 mod persistence;
@@ -130,6 +131,7 @@ fn mark_modified(store: &Store, key: &[u8]) {
         return;
     }
     drop(staged);
+    store.changed.notify_all();
     store.eviction.note_modified(key);
     mark_evicted(store, key);
 }
@@ -159,6 +161,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             .get(1)
             .is_some_and(|name| name.eq_ignore_ascii_case(b"SET")))
         || cache::is_mutating(command)
+        || geo::is_mutating(command)
         || list_ops::is_mutating(command)
         || bitmaps::is_mutating(command)
         || sorted_sets::is_mutating(command)
@@ -175,6 +178,10 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             b"BRPOPLPUSH",
             b"LMPOP",
             b"BLMPOP",
+            b"ZMPOP",
+            b"BZMPOP",
+            b"BZPOPMIN",
+            b"BZPOPMAX",
             b"XADD",
             b"XDEL",
             b"XTRIM",
@@ -188,6 +195,8 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             b"EXPIREAT",
             b"PEXPIREAT",
             b"PERSIST",
+            b"FLUSHDB",
+            b"FLUSHALL",
         ]
         .iter()
         .any(|name| command[0].eq_ignore_ascii_case(name))
@@ -196,6 +205,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
 fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
     // Collection handlers record real changes themselves, including no-op checks.
     if cache::valid_arity(command).is_some()
+        || geo::valid_arity(command).is_some()
         || list_ops::valid_arity(command).is_some()
         || bitmaps::valid_arity(command).is_some()
         || sorted_sets::valid_arity(command).is_some()
@@ -214,8 +224,14 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
         || command[0].eq_ignore_ascii_case(b"BRPOPLPUSH")
         || command[0].eq_ignore_ascii_case(b"LMPOP")
         || command[0].eq_ignore_ascii_case(b"BLMPOP")
+        || command[0].eq_ignore_ascii_case(b"ZMPOP")
+        || command[0].eq_ignore_ascii_case(b"BZMPOP")
+        || command[0].eq_ignore_ascii_case(b"BZPOPMIN")
+        || command[0].eq_ignore_ascii_case(b"BZPOPMAX")
         || command[0].eq_ignore_ascii_case(b"XDEL")
         || command[0].eq_ignore_ascii_case(b"XTRIM")
+        || command[0].eq_ignore_ascii_case(b"FLUSHDB")
+        || command[0].eq_ignore_ascii_case(b"FLUSHALL")
     {
         return;
     }
@@ -580,6 +596,178 @@ fn try_multi_pop(
     None
 }
 
+struct ZPopOptions<'a> {
+    keys: &'a [Vec<u8>],
+    from_max: bool,
+    count: usize,
+    deadline: Option<Instant>,
+    legacy: bool,
+}
+
+fn parse_zpop(command: &[Vec<u8>]) -> Result<ZPopOptions<'_>, Vec<u8>> {
+    let name = &command[0];
+    let legacy = name.eq_ignore_ascii_case(b"BZPOPMIN") || name.eq_ignore_ascii_case(b"BZPOPMAX");
+    let blocking = legacy || name.eq_ignore_ascii_case(b"BZMPOP");
+    let wrong_arity = || {
+        protocol::error(&format!(
+            "wrong number of arguments for '{}' command",
+            String::from_utf8_lossy(name).to_ascii_lowercase()
+        ))
+    };
+    if legacy {
+        if command.len() < 3 {
+            return Err(wrong_arity());
+        }
+        return Ok(ZPopOptions {
+            keys: &command[1..command.len() - 1],
+            from_max: name.eq_ignore_ascii_case(b"BZPOPMAX"),
+            count: 1,
+            deadline: blpop_deadline(command.last().unwrap())?,
+            legacy: true,
+        });
+    }
+    let count_at = if blocking { 2 } else { 1 };
+    if command.len() < count_at + 3 {
+        return Err(wrong_arity());
+    }
+    let deadline = if blocking {
+        blpop_deadline(&command[1])?
+    } else {
+        None
+    };
+    let numkeys = std::str::from_utf8(&command[count_at])
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| protocol::error("numkeys should be greater than 0"))?;
+    let start = count_at + 1;
+    let end = start
+        .checked_add(numkeys)
+        .filter(|end| *end < command.len())
+        .ok_or_else(wrong_arity)?;
+    let from_max = if command[end].eq_ignore_ascii_case(b"MAX") {
+        true
+    } else if command[end].eq_ignore_ascii_case(b"MIN") {
+        false
+    } else {
+        return Err(protocol::error("syntax error"));
+    };
+    let count = if command.len() == end + 1 {
+        1
+    } else if command.len() == end + 3 && command[end + 1].eq_ignore_ascii_case(b"COUNT") {
+        std::str::from_utf8(&command[end + 2])
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| protocol::error("COUNT should be greater than 0"))?
+    } else {
+        return Err(protocol::error("syntax error"));
+    };
+    Ok(ZPopOptions {
+        keys: &command[start..end],
+        from_max,
+        count,
+        deadline,
+        legacy: false,
+    })
+}
+
+fn try_zpop(
+    entries: &mut HashMap<Vec<u8>, Entry>,
+    options: &ZPopOptions<'_>,
+    store: &Store,
+) -> Option<Vec<u8>> {
+    for key in options.keys {
+        remove_expired(entries, key);
+        match entries.get_mut(key) {
+            Some(Entry {
+                value: Value::SortedSet(scores),
+                ..
+            }) => {
+                if scores.is_empty() {
+                    continue;
+                }
+                let selected: Vec<_> = if options.from_max {
+                    scores
+                        .entries()
+                        .rev()
+                        .take(options.count)
+                        .map(|(member, score)| (member.clone(), score))
+                        .collect()
+                } else {
+                    scores
+                        .entries()
+                        .take(options.count)
+                        .map(|(member, score)| (member.clone(), score))
+                        .collect()
+                };
+                for (member, _) in &selected {
+                    scores.remove(member);
+                }
+                if scores.is_empty() {
+                    entries.remove(key);
+                }
+                mark_modified(store, key);
+                if options.legacy {
+                    let (member, score) = &selected[0];
+                    return Some(protocol::array(&[
+                        key.clone(),
+                        member.clone(),
+                        sorted_sets::score_text(*score),
+                    ]));
+                }
+                let mut reply = b"*2\r\n".to_vec();
+                reply.extend(protocol::bulk(key));
+                reply.extend(format!("*{}\r\n", selected.len()).as_bytes());
+                for (member, score) in selected {
+                    reply.extend(b"*2\r\n");
+                    reply.extend(protocol::bulk(&member));
+                    reply.extend(protocol::bulk(&sorted_sets::score_text(score)));
+                }
+                return Some(reply);
+            }
+            Some(_) => {
+                return Some(
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                );
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+fn zpop_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
+    let options = match parse_zpop(command) {
+        Ok(options) => options,
+        Err(error) => return error,
+    };
+    let blocking = command[0].eq_ignore_ascii_case(b"BZMPOP") || options.legacy;
+    loop {
+        let gate = (blocking && allow_blocking).then(|| store.command_gate.lock().unwrap());
+        let mut entries = store.entries.lock().unwrap();
+        if let Some(response) = try_zpop(&mut entries, &options, store) {
+            return response;
+        }
+        if !blocking || !allow_blocking {
+            return b"*-1\r\n".to_vec();
+        }
+        drop(gate);
+        match options.deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return b"*-1\r\n".to_vec();
+                }
+                entries = store.changed.wait_timeout(entries, remaining).unwrap().0;
+            }
+            None => entries = store.changed.wait(entries).unwrap(),
+        }
+        drop(entries);
+    }
+}
+
 fn blocking_move(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
     let legacy = command[0].eq_ignore_ascii_case(b"BRPOPLPUSH");
     if command.len() != if legacy { 4 } else { 6 } {
@@ -764,6 +952,8 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
         response
     } else if let Some(response) = cache::execute(command, store) {
         response
+    } else if let Some(response) = geo::execute(command, store) {
+        response
     } else if let Some(response) = list_ops::execute(command, store) {
         response
     } else if let Some(response) = bitmaps::execute(command, store) {
@@ -799,6 +989,33 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                 now.as_secs().to_string().into_bytes(),
                 now.subsec_micros().to_string().into_bytes(),
             ])
+        }
+    } else if command[0].eq_ignore_ascii_case(b"FLUSHDB")
+        || command[0].eq_ignore_ascii_case(b"FLUSHALL")
+    {
+        if command.len() > 2 {
+            protocol::error(&format!(
+                "wrong number of arguments for '{}' command",
+                String::from_utf8_lossy(&command[0]).to_ascii_lowercase()
+            ))
+        } else if command.len() == 2
+            && !command[1].eq_ignore_ascii_case(b"SYNC")
+            && !command[1].eq_ignore_ascii_case(b"ASYNC")
+        {
+            protocol::error("syntax error")
+        } else {
+            let mut entries = store.entries.lock().unwrap();
+            let keys: Vec<_> = entries.keys().cloned().collect();
+            entries.clear();
+            drop(entries);
+            for key in keys {
+                store.eviction.forget(&key);
+                mark_evicted(store, &key);
+            }
+            for registration in store.watched_keys.lock().unwrap().values_mut() {
+                registration.revision = registration.revision.wrapping_add(1);
+            }
+            b"+OK\r\n".to_vec()
         }
     } else if command[0].eq_ignore_ascii_case(b"GET") {
         if command.len() != 2 {
@@ -1070,6 +1287,12 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                 drop(entries);
             },
         }
+    } else if command[0].eq_ignore_ascii_case(b"ZMPOP")
+        || command[0].eq_ignore_ascii_case(b"BZMPOP")
+        || command[0].eq_ignore_ascii_case(b"BZPOPMIN")
+        || command[0].eq_ignore_ascii_case(b"BZPOPMAX")
+    {
+        zpop_command(command, store, allow_blocking)
     } else if command[0].eq_ignore_ascii_case(b"TYPE") {
         if command.len() != 2 {
             protocol::error("wrong number of arguments for 'type' command")
@@ -1328,6 +1551,8 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
         valid
     } else if let Some(valid) = cache::valid_arity(command) {
         valid
+    } else if let Some(valid) = geo::valid_arity(command) {
+        valid
     } else if let Some(valid) = list_ops::valid_arity(command) {
         valid
     } else if let Some(valid) = bitmaps::valid_arity(command) {
@@ -1342,6 +1567,8 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
         arity <= 2
     } else if name.eq_ignore_ascii_case(b"UNWATCH") || name.eq_ignore_ascii_case(b"TIME") {
         arity == 1
+    } else if name.eq_ignore_ascii_case(b"FLUSHDB") || name.eq_ignore_ascii_case(b"FLUSHALL") {
+        arity == 1 || arity == 2
     } else if name.eq_ignore_ascii_case(b"ECHO")
         || name.eq_ignore_ascii_case(b"GET")
         || name.eq_ignore_ascii_case(b"INCR")
@@ -1368,6 +1595,12 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
         arity >= 4
     } else if name.eq_ignore_ascii_case(b"BLMPOP") {
         arity >= 5
+    } else if name.eq_ignore_ascii_case(b"ZMPOP") {
+        arity >= 4
+    } else if name.eq_ignore_ascii_case(b"BZMPOP") {
+        arity >= 5
+    } else if name.eq_ignore_ascii_case(b"BZPOPMIN") || name.eq_ignore_ascii_case(b"BZPOPMAX") {
+        arity >= 3
     } else if name.eq_ignore_ascii_case(b"XADD") {
         arity >= 5 && arity % 2 == 1
     } else if name.eq_ignore_ascii_case(b"XDEL") {
@@ -1540,6 +1773,9 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             || command[0].eq_ignore_ascii_case(b"BLMOVE")
             || command[0].eq_ignore_ascii_case(b"BRPOPLPUSH")
             || command[0].eq_ignore_ascii_case(b"BLMPOP")
+            || command[0].eq_ignore_ascii_case(b"BZMPOP")
+            || command[0].eq_ignore_ascii_case(b"BZPOPMIN")
+            || command[0].eq_ignore_ascii_case(b"BZPOPMAX")
             || command[0].eq_ignore_ascii_case(b"XREAD")
         {
             let response = execute_command(&command, &store, true);

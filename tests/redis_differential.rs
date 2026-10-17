@@ -39,6 +39,10 @@ fn representative_resp2_sequences_match_a_real_redis_server() {
         b"reru-diff:zalg-a",
         b"reru-diff:zalg-b",
         b"reru-diff:zalg-out",
+        b"reru-diff:zpop",
+        b"reru-diff:zpop-missing",
+        b"reru-diff:geo",
+        b"reru-diff:geo-near",
     ];
     let mut reset = vec![b"DEL".as_slice()];
     reset.extend(keys);
@@ -149,6 +153,102 @@ fn representative_resp2_sequences_match_a_real_redis_server() {
         &[b"HEXISTS", b"reru-diff:hash", b"missing"],
         &[b"HLEN", b"reru-diff:hash"],
         &[b"HDEL", b"reru-diff:hash", b"b"],
+    ] {
+        compare(&mut ours, &mut redis, command);
+    }
+
+    for command in [
+        &[
+            b"ZADD".as_slice(),
+            b"reru-diff:zpop",
+            b"1",
+            b"a",
+            b"2",
+            b"b",
+            b"3",
+            b"c",
+        ] as &[&[u8]],
+        &[
+            b"ZMPOP",
+            b"2",
+            b"reru-diff:zpop-missing",
+            b"reru-diff:zpop",
+            b"MIN",
+            b"COUNT",
+            b"2",
+        ],
+        &[b"BZMPOP", b"0.05", b"1", b"reru-diff:zpop", b"MAX"],
+        &[b"BZPOPMIN", b"reru-diff:zpop", b"0.01"],
+        &[b"ZADD", b"reru-diff:zpop", b"4", b"last"],
+        &[b"BZPOPMAX", b"reru-diff:zpop", b"0.05"],
+    ] {
+        compare(&mut ours, &mut redis, command);
+    }
+
+    for command in [
+        &[
+            b"GEOADD".as_slice(),
+            b"reru-diff:geo",
+            b"13.361389",
+            b"38.115556",
+            b"Palermo",
+            b"15.087269",
+            b"37.502669",
+            b"Catania",
+        ] as &[&[u8]],
+        &[b"ZSCORE", b"reru-diff:geo", b"Palermo"],
+        &[b"GEOPOS", b"reru-diff:geo", b"Palermo", b"Catania"],
+        &[b"GEOHASH", b"reru-diff:geo", b"Palermo", b"Catania"],
+        &[b"GEODIST", b"reru-diff:geo", b"Palermo", b"Catania", b"km"],
+        &[
+            b"GEOADD",
+            b"reru-diff:geo",
+            b"XX",
+            b"CH",
+            b"13.5",
+            b"38.2",
+            b"Palermo",
+        ],
+        &[
+            b"GEOSEARCH",
+            b"reru-diff:geo",
+            b"FROMMEMBER",
+            b"Palermo",
+            b"BYRADIUS",
+            b"200",
+            b"km",
+            b"ASC",
+            b"WITHDIST",
+            b"WITHHASH",
+            b"WITHCOORD",
+        ],
+        &[
+            b"GEOSEARCH",
+            b"reru-diff:geo",
+            b"FROMLONLAT",
+            b"13",
+            b"38",
+            b"BYBOX",
+            b"500",
+            b"500",
+            b"km",
+            b"ASC",
+            b"COUNT",
+            b"1",
+        ],
+        &[
+            b"GEOSEARCHSTORE",
+            b"reru-diff:geo-near",
+            b"reru-diff:geo",
+            b"FROMMEMBER",
+            b"Palermo",
+            b"BYRADIUS",
+            b"200",
+            b"km",
+            b"ASC",
+            b"STOREDIST",
+        ],
+        &[b"ZSCORE", b"reru-diff:geo-near", b"Catania"],
     ] {
         compare(&mut ours, &mut redis, command);
     }

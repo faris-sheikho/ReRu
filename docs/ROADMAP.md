@@ -9,8 +9,10 @@ partial INFO memory/stats, keyspace and collection scans, and expiry inspection 
 ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
 local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
-The latest increment adds floating-point string increments, the legacy SUBSTR
-alias, and server TIME. Earlier increments added blocking list moves and
+The latest increment adds sorted-set multi-key and blocking pops plus initial
+geospatial storage and search, plus single-database flush operations. Earlier
+increments added floating-point string increments, the legacy SUBSTR alias,
+server TIME, blocking list moves and
 multi-key pops, stream deletion/trimming/reverse ranges, set intersection
 cardinality, sorted-set lex ranges, bitfields and sorted-set algebra. A small
 differential suite has passed against Redis 7.0.15, including these string and
@@ -28,14 +30,14 @@ not been selected.
 - Compare observable behavior against a real Redis server and keep regression
   tests for every command before marking it complete.
 - Track command-name presence separately from verified behavior and subsystem
-  coverage. The current 158/459 metadata entries (34.4%) do not establish
+  coverage. The current 170/459 metadata entries (37.0%) do not establish
   30–40% implementation of Redis.
 - Keep the server usable after every small, tested commit.
 
 ## Work remaining
 
 1. Complete lists and streams, including blocking operations and stream IDs.
-2. Expand sorted sets and bitmaps, add geospatial indexes; extend hashes and
+2. Expand sorted sets, bitmaps, and geospatial indexing; extend hashes and
    sets with scans, field expiry, random access, moves, and storing set algebra
    results.
 3. Expand transaction compatibility testing, Pub/Sub coverage, scripting, and

@@ -297,12 +297,17 @@ impl Eviction {
             command[2..command.len().min(2usize.saturating_add(count))]
                 .iter()
                 .collect()
-        } else if name.eq_ignore_ascii_case(b"LMPOP") || name.eq_ignore_ascii_case(b"BLMPOP") {
-            let count_at = if name.eq_ignore_ascii_case(b"BLMPOP") {
-                2
-            } else {
-                1
-            };
+        } else if name.eq_ignore_ascii_case(b"LMPOP")
+            || name.eq_ignore_ascii_case(b"BLMPOP")
+            || name.eq_ignore_ascii_case(b"ZMPOP")
+            || name.eq_ignore_ascii_case(b"BZMPOP")
+        {
+            let count_at =
+                if name.eq_ignore_ascii_case(b"BLMPOP") || name.eq_ignore_ascii_case(b"BZMPOP") {
+                    2
+                } else {
+                    1
+                };
             let count = command
                 .get(count_at)
                 .and_then(|value| std::str::from_utf8(value).ok())
@@ -340,6 +345,7 @@ impl Eviction {
         } else if name.eq_ignore_ascii_case(b"RENAME")
             || name.eq_ignore_ascii_case(b"RENAMENX")
             || name.eq_ignore_ascii_case(b"COPY")
+            || name.eq_ignore_ascii_case(b"GEOSEARCHSTORE")
             || name.eq_ignore_ascii_case(b"LMOVE")
             || name.eq_ignore_ascii_case(b"RPOPLPUSH")
             || name.eq_ignore_ascii_case(b"BLMOVE")
@@ -351,11 +357,17 @@ impl Eviction {
             crate::parse_xread(command)
                 .map(|options| options.keys.iter().collect())
                 .unwrap_or_default()
-        } else if name.eq_ignore_ascii_case(b"BLPOP") || name.eq_ignore_ascii_case(b"BRPOP") {
+        } else if name.eq_ignore_ascii_case(b"BLPOP")
+            || name.eq_ignore_ascii_case(b"BRPOP")
+            || name.eq_ignore_ascii_case(b"BZPOPMIN")
+            || name.eq_ignore_ascii_case(b"BZPOPMAX")
+        {
             command[1..command.len() - 1].iter().collect()
         } else if name.eq_ignore_ascii_case(b"PING")
             || name.eq_ignore_ascii_case(b"ECHO")
             || name.eq_ignore_ascii_case(b"TIME")
+            || name.eq_ignore_ascii_case(b"FLUSHDB")
+            || name.eq_ignore_ascii_case(b"FLUSHALL")
             || name.eq_ignore_ascii_case(b"CONFIG")
         {
             Vec::new()

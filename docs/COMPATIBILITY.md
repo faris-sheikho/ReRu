@@ -1,6 +1,6 @@
 # ReRu compatibility status
 
-Updated: 17 October 2026. This inventory describes the implementation and local
+Updated: 18 October 2026. This inventory describes the implementation and local
 tests; it does not certify complete compatibility with Redis.
 
 ## Implemented commands
@@ -13,9 +13,10 @@ tests; it does not certify complete compatibility with Redis.
 | Streams | `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, `XTRIM` | Entry IDs, forward/reverse ranges, deletion, exact MAXLEN/MINID trimming and blocking reads; no consumer groups |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, `HSCAN` | Binary fields/values, multiple field updates, missing-field nil replies, increments, random fields and cursor iteration |
 | Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SINTERCARD`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `SSCAN` | Binary members, deduplication, membership, cardinality, random selection, atomic moves, set algebra and cursor iteration; SINTERCARD LIMIT |
-| Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANGEBYLEX`, `ZREVRANGEBYLEX`, `ZCOUNT`, `ZLEXCOUNT`, `ZREM`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYLEX`, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, `ZPOPMAX`, `ZUNION`, `ZUNIONSTORE`, `ZINTER`, `ZINTERSTORE`, `ZDIFF`, `ZDIFFSTORE`, `ZINTERCARD` | Score-ordered members, rank, score and lex ranges, ZADD NX/XX/GT/LT/CH/INCR, cursor iteration, range removal, ordered popping, weighted algebra and destination storing |
+| Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANGEBYLEX`, `ZREVRANGEBYLEX`, `ZCOUNT`, `ZLEXCOUNT`, `ZREM`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYLEX`, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, `ZPOPMAX`, `ZMPOP`, `BZMPOP`, `BZPOPMIN`, `BZPOPMAX`, `ZUNION`, `ZUNIONSTORE`, `ZINTER`, `ZINTERSTORE`, `ZDIFF`, `ZDIFFSTORE`, `ZINTERCARD` | Score-ordered members, rank, score and lex ranges, ZADD NX/XX/GT/LT/CH/INCR, cursor iteration, range removal, ordered and multi-key blocking pops, weighted algebra and destination storing |
 | Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS`, `BITFIELD`, `BITFIELD_RO` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT; bitfield GET/SET/INCRBY, signed/unsigned widths, `#` offsets and WRAP/SAT/FAIL overflow modes |
-| Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `KEYS`, `SCAN`, `RANDOMKEY`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST` | Multiple keys, glob and type filtered scanning, rename/copy with TTL, relative/absolute expiry conditions |
+| Geospatial | `GEOADD`, `GEOPOS`, `GEOHASH`, `GEODIST`, `GEOSEARCH`, `GEOSEARCHSTORE` | Geo points use sorted-set scores; NX/XX/CH, positions and distances, radius/box search, sort/count, decorated results, and destination storing |
+| Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `KEYS`, `SCAN`, `RANDOMKEY`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST`, `FLUSHDB`, `FLUSHALL` | Multiple keys, glob and type filtered scanning, rename/copy with TTL, relative/absolute expiry conditions, whole-database flush |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB` | Binary channels/messages, glob patterns, RESP2 subscribed mode, CHANNELS/NUMSUB/NUMPAT; local process only |
 | Connection close | `QUIT` | Replies OK and closes the connection |
@@ -23,7 +24,7 @@ tests; it does not certify complete compatibility with Redis.
 | Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
 | Server time | `TIME` | Epoch seconds and microseconds as RESP2 bulk strings |
 
-Total: **158 Redis command metadata entries**, or **34.4% name presence**
+Total: **170 Redis command metadata entries**, or **37.0% name presence**
 against 459 entries in the pinned Redis 8.10.2 metadata. This is neither a
 behavior pass rate nor a percentage of Redis completed. Run
 `powershell -File scripts/command_coverage.ps1 -RedisSource PATH_TO_REDIS_8_10_2`
@@ -35,6 +36,14 @@ the popped members in left or right pop order. `BLMOVE` and `BRPOPLPUSH` move
 one element atomically and block on a missing source. Timeout `0` waits
 indefinitely outside transactions; inside MULTI/EXEC these commands return
 immediately. Waiting clients do not yet have Redis's FIFO ordering guarantee.
+`ZMPOP`, `BZMPOP`, `BZPOPMIN`, and `BZPOPMAX` similarly choose the first
+nonempty sorted-set key, pop in score order, and delete an emptied key.
+Blocking forms wait for another write and return immediately inside MULTI/EXEC.
+
+Geo search scans the sorted set, then filters and sorts candidates. This is
+slower than Redis's geohash-area query for large datasets. `COUNT ANY` currently
+uses the same post-filter limit as `COUNT`; Redis may stop early. The
+`GEORADIUS` aliases and cross-dateline box behavior remain to be verified.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
 creation/deletion, and natural expiry. EXEC and DISCARD clear the connection's
@@ -86,6 +95,9 @@ reports `evicted_keys`. Other INFO fields and sections are not implemented.
 saved to a config file.
 
 `COPY` supports same-database copy and `REPLACE`; `DB` selection is pending.
+`FLUSHDB` and `FLUSHALL` both clear ReRu's only database. `ASYNC` is accepted
+but deletion is currently synchronous; flush invalidates WATCH and is persisted
+through ReRu snapshots/AOF.
 `UNLINK` removes keys immediately but frees memory synchronously, unlike
 Redis's background reclamation. `DBSIZE` counts unexpired keys without an
 active expiry sweep. `TOUCH` updates the in-memory access order and frequency.
@@ -157,7 +169,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **140 tests**: 10 unit tests and 130 server integration tests.
+The local suite has **148 tests**: 10 unit tests and 138 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,

@@ -236,7 +236,7 @@ fn integer(value: usize) -> Vec<u8> {
 fn wrong_type() -> Vec<u8> {
     b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n".to_vec()
 }
-fn score_text(score: f64) -> Vec<u8> {
+pub(crate) fn score_text(score: f64) -> Vec<u8> {
     if score == f64::INFINITY {
         b"inf".to_vec()
     } else if score == f64::NEG_INFINITY {
