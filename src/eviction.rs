@@ -297,6 +297,21 @@ impl Eviction {
             command[2..command.len().min(2usize.saturating_add(count))]
                 .iter()
                 .collect()
+        } else if name.eq_ignore_ascii_case(b"LMPOP") || name.eq_ignore_ascii_case(b"BLMPOP") {
+            let count_at = if name.eq_ignore_ascii_case(b"BLMPOP") {
+                2
+            } else {
+                1
+            };
+            let count = command
+                .get(count_at)
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            let from = count_at + 1;
+            command[from.min(command.len())..command.len().min(from.saturating_add(count))]
+                .iter()
+                .collect()
         } else if [
             b"ZUNION".as_slice(),
             b"ZINTER",
@@ -327,6 +342,8 @@ impl Eviction {
             || name.eq_ignore_ascii_case(b"COPY")
             || name.eq_ignore_ascii_case(b"LMOVE")
             || name.eq_ignore_ascii_case(b"RPOPLPUSH")
+            || name.eq_ignore_ascii_case(b"BLMOVE")
+            || name.eq_ignore_ascii_case(b"BRPOPLPUSH")
             || name.eq_ignore_ascii_case(b"SMOVE")
         {
             command[1..command.len().min(3)].iter().collect()

@@ -171,6 +171,10 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             b"LPOP",
             b"BLPOP",
             b"BRPOP",
+            b"BLMOVE",
+            b"BRPOPLPUSH",
+            b"LMPOP",
+            b"BLMPOP",
             b"XADD",
             b"XDEL",
             b"XTRIM",
@@ -206,6 +210,10 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
         || command[0].eq_ignore_ascii_case(b"CONFIG")
         || command[0].eq_ignore_ascii_case(b"BLPOP")
         || command[0].eq_ignore_ascii_case(b"BRPOP")
+        || command[0].eq_ignore_ascii_case(b"BLMOVE")
+        || command[0].eq_ignore_ascii_case(b"BRPOPLPUSH")
+        || command[0].eq_ignore_ascii_case(b"LMPOP")
+        || command[0].eq_ignore_ascii_case(b"BLMPOP")
         || command[0].eq_ignore_ascii_case(b"XDEL")
         || command[0].eq_ignore_ascii_case(b"XTRIM")
     {
@@ -469,6 +477,173 @@ fn blpop_deadline(timeout: &[u8]) -> Result<Option<Instant>, Vec<u8>> {
         .checked_add(duration)
         .map(Some)
         .ok_or_else(|| protocol::error("timeout is not a float or out of range"))
+}
+
+struct MultiPopOptions<'a> {
+    keys: &'a [Vec<u8>],
+    from_right: bool,
+    count: usize,
+    deadline: Option<Instant>,
+}
+
+fn parse_multi_pop(command: &[Vec<u8>], blocking: bool) -> Result<MultiPopOptions<'_>, Vec<u8>> {
+    let count_at = if blocking { 2 } else { 1 };
+    let wrong_arity = || {
+        protocol::error(&format!(
+            "wrong number of arguments for '{}' command",
+            String::from_utf8_lossy(&command[0]).to_ascii_lowercase()
+        ))
+    };
+    if command.len() < count_at + 3 {
+        return Err(wrong_arity());
+    }
+    let deadline = if blocking {
+        blpop_deadline(&command[1])?
+    } else {
+        None
+    };
+    let numkeys = std::str::from_utf8(&command[count_at])
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| protocol::error("numkeys should be greater than 0"))?;
+    let start = count_at + 1;
+    let end = start
+        .checked_add(numkeys)
+        .filter(|end| *end < command.len())
+        .ok_or_else(wrong_arity)?;
+    let from_right = if command[end].eq_ignore_ascii_case(b"RIGHT") {
+        true
+    } else if command[end].eq_ignore_ascii_case(b"LEFT") {
+        false
+    } else {
+        return Err(protocol::error("syntax error"));
+    };
+    let count = if command.len() == end + 1 {
+        1
+    } else if command.len() == end + 3 && command[end + 1].eq_ignore_ascii_case(b"COUNT") {
+        std::str::from_utf8(&command[end + 2])
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| protocol::error("COUNT should be greater than 0"))?
+    } else {
+        return Err(protocol::error("syntax error"));
+    };
+    Ok(MultiPopOptions {
+        keys: &command[start..end],
+        from_right,
+        count,
+        deadline,
+    })
+}
+
+fn try_multi_pop(
+    entries: &mut HashMap<Vec<u8>, Entry>,
+    options: &MultiPopOptions<'_>,
+    store: &Store,
+) -> Option<Vec<u8>> {
+    for key in options.keys {
+        remove_expired(entries, key);
+        match entries.get_mut(key) {
+            Some(Entry {
+                value: Value::List(items),
+                ..
+            }) => {
+                if items.is_empty() {
+                    continue;
+                }
+                let count = options.count.min(items.len());
+                let values = if options.from_right {
+                    (0..count).map(|_| items.pop().unwrap()).collect::<Vec<_>>()
+                } else {
+                    items.drain(..count).collect::<Vec<_>>()
+                };
+                if items.is_empty() {
+                    entries.remove(key);
+                }
+                mark_modified(store, key);
+                let mut reply = b"*2\r\n".to_vec();
+                reply.extend(protocol::bulk(key));
+                reply.extend(protocol::array(&values));
+                return Some(reply);
+            }
+            Some(_) => {
+                return Some(
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                );
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+fn blocking_move(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
+    let legacy = command[0].eq_ignore_ascii_case(b"BRPOPLPUSH");
+    if command.len() != if legacy { 4 } else { 6 } {
+        return protocol::error(&format!(
+            "wrong number of arguments for '{}' command",
+            String::from_utf8_lossy(&command[0]).to_ascii_lowercase()
+        ));
+    }
+    let deadline = match blpop_deadline(command.last().unwrap()) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let move_command = if legacy {
+        vec![
+            b"RPOPLPUSH".to_vec(),
+            command[1].clone(),
+            command[2].clone(),
+        ]
+    } else {
+        for direction in [&command[3], &command[4]] {
+            if !direction.eq_ignore_ascii_case(b"LEFT") && !direction.eq_ignore_ascii_case(b"RIGHT")
+            {
+                return protocol::error("syntax error");
+            }
+        }
+        let mut move_command = vec![b"LMOVE".to_vec()];
+        move_command.extend_from_slice(&command[1..5]);
+        move_command
+    };
+    loop {
+        let gate = allow_blocking.then(|| store.command_gate.lock().unwrap());
+        let mut entries = store.entries.lock().unwrap();
+        remove_expired(&mut entries, &command[1]);
+        let available = match entries.get(&command[1]).map(|entry| &entry.value) {
+            Some(Value::List(items)) => !items.is_empty(),
+            Some(_) => true,
+            None => false,
+        };
+        if available {
+            drop(entries);
+            let response = if allow_blocking {
+                execute_checked(&move_command, store, false)
+            } else {
+                list_ops::execute(&move_command, store).expect("valid move command")
+            };
+            drop(gate);
+            return response;
+        }
+        if !allow_blocking {
+            return b"$-1\r\n".to_vec();
+        }
+        drop(gate);
+        match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return b"$-1\r\n".to_vec();
+                }
+                entries = store.changed.wait_timeout(entries, remaining).unwrap().0;
+            }
+            None => entries = store.changed.wait(entries).unwrap(),
+        }
+        drop(entries);
+    }
 }
 
 struct XReadOptions<'a> {
@@ -850,6 +1025,39 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
                 }
             }
         }
+    } else if command[0].eq_ignore_ascii_case(b"BLMOVE")
+        || command[0].eq_ignore_ascii_case(b"BRPOPLPUSH")
+    {
+        blocking_move(command, store, allow_blocking)
+    } else if command[0].eq_ignore_ascii_case(b"LMPOP")
+        || command[0].eq_ignore_ascii_case(b"BLMPOP")
+    {
+        let blocking = command[0].eq_ignore_ascii_case(b"BLMPOP");
+        match parse_multi_pop(command, blocking) {
+            Err(error) => error,
+            Ok(options) => loop {
+                let gate = (blocking && allow_blocking).then(|| store.command_gate.lock().unwrap());
+                let mut entries = store.entries.lock().unwrap();
+                if let Some(response) = try_multi_pop(&mut entries, &options, store) {
+                    break response;
+                }
+                if !blocking || !allow_blocking {
+                    break b"*-1\r\n".to_vec();
+                }
+                drop(gate);
+                match options.deadline {
+                    Some(deadline) => {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break b"*-1\r\n".to_vec();
+                        }
+                        entries = store.changed.wait_timeout(entries, remaining).unwrap().0;
+                    }
+                    None => entries = store.changed.wait(entries).unwrap(),
+                }
+                drop(entries);
+            },
+        }
     } else if command[0].eq_ignore_ascii_case(b"TYPE") {
         if command.len() != 2 {
             protocol::error("wrong number of arguments for 'type' command")
@@ -1140,6 +1348,14 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
         arity == 4
     } else if name.eq_ignore_ascii_case(b"LPOP") {
         arity == 2 || arity == 3
+    } else if name.eq_ignore_ascii_case(b"BLMOVE") {
+        arity == 6
+    } else if name.eq_ignore_ascii_case(b"BRPOPLPUSH") {
+        arity == 4
+    } else if name.eq_ignore_ascii_case(b"LMPOP") {
+        arity >= 4
+    } else if name.eq_ignore_ascii_case(b"BLMPOP") {
+        arity >= 5
     } else if name.eq_ignore_ascii_case(b"XADD") {
         arity >= 5 && arity % 2 == 1
     } else if name.eq_ignore_ascii_case(b"XDEL") {
@@ -1309,6 +1525,9 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             }
         } else if command[0].eq_ignore_ascii_case(b"BLPOP")
             || command[0].eq_ignore_ascii_case(b"BRPOP")
+            || command[0].eq_ignore_ascii_case(b"BLMOVE")
+            || command[0].eq_ignore_ascii_case(b"BRPOPLPUSH")
+            || command[0].eq_ignore_ascii_case(b"BLMPOP")
             || command[0].eq_ignore_ascii_case(b"XREAD")
         {
             let response = execute_command(&command, &store, true);

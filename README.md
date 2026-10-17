@@ -34,7 +34,8 @@ count. These memory figures are not the process's actual RAM use.
 - RESP2, concurrent clients, strings, lists, streams, hashes, sets, and sorted sets; key expiry
 - `PING`, `ECHO`, `SET`, `GET`, `INCR`, `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP`, `BRPOP`, `TYPE`
 - Additional list editing and movement: `RPOP`, `LINDEX`, `LSET`, `LTRIM`,
-  `LINSERT`, `LPUSHX`, `RPUSHX`, `LMOVE`, `RPOPLPUSH`, `LPOS`, and `LREM`
+  `LINSERT`, `LPUSHX`, `RPUSHX`, `LMOVE`, `RPOPLPUSH`, `BLMOVE`,
+  `BRPOPLPUSH`, `LMPOP`, `BLMPOP`, `LPOS`, and `LREM`
 - Cache-oriented string operations: conditional/expiring `SET`, `GETEX`, `GETDEL`,
   `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, legacy set variants,
   integer increment/decrement variants, `GETRANGE`, and `SETRANGE`
@@ -60,10 +61,10 @@ count. These memory figures are not the process's actual RAM use.
 - Optional append-only persistence with restart and partial-tail recovery;
   `EXPIREAT` and `PEXPIREAT` for absolute key expiry
 
-151 Redis command metadata entries have an implementation path, with limitations
-documented in the [compatibility status](docs/COMPATIBILITY.md). This is 32.9%
-of the 459 entries in the pinned Redis 8.10.2 command metadata, **not** 30.9%
-Redis compatibility. ReRu replication uses the custom
+155 Redis command metadata entries have an implementation path, with limitations
+documented in the [compatibility status](docs/COMPATIBILITY.md). This is 33.8%
+of the 459 entries in the pinned Redis 8.10.2 command metadata, **not** a
+Redis compatibility percentage. ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 
 Redis RDB and full Redis AOF compatibility, PSYNC replication, clustering, authentication,

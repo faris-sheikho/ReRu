@@ -1,6 +1,6 @@
 # ReRu compatibility status
 
-Updated: 16 October 2026. This inventory describes the implementation and local
+Updated: 17 October 2026. This inventory describes the implementation and local
 tests; it does not certify complete compatibility with Redis.
 
 ## Implemented commands
@@ -9,7 +9,7 @@ tests; it does not certify complete compatibility with Redis.
 | --- | --- | --- |
 | Connection | `PING`, `ECHO` | PING with an optional message; RESP2 requests/replies |
 | Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `INCRBY`, `DECR`, `DECRBY`, `GETRANGE`, `SETRANGE` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access, integer arithmetic and byte ranges |
-| Lists | `RPUSH`, `LPUSH`, `LPUSHX`, `RPUSHX`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LREM`, `LPOS`, `LPOP`, `RPOP`, `RPOPLPUSH`, `LMOVE`, `BLPOP`, `BRPOP` | Multiple elements, negative indexes, edits, moves, position search, blocking left/right pops with timeout |
+| Lists | `RPUSH`, `LPUSH`, `LPUSHX`, `RPUSHX`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LREM`, `LPOS`, `LPOP`, `RPOP`, `RPOPLPUSH`, `LMOVE`, `BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, `LMPOP`, `BLMPOP` | Multiple elements, negative indexes, edits, moves, position search, single/multi-key blocking pops and moves with timeout |
 | Streams | `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, `XTRIM` | Entry IDs, forward/reverse ranges, deletion, exact MAXLEN/MINID trimming and blocking reads; no consumer groups |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, `HSCAN` | Binary fields/values, multiple field updates, missing-field nil replies, increments, random fields and cursor iteration |
 | Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SINTERCARD`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `SSCAN` | Binary members, deduplication, membership, cardinality, random selection, atomic moves, set algebra and cursor iteration; SINTERCARD LIMIT |
@@ -22,12 +22,18 @@ tests; it does not certify complete compatibility with Redis.
 | Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
 | Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
 
-Total: **151 Redis command metadata entries**, or **32.9% name presence**
+Total: **155 Redis command metadata entries**, or **33.8% name presence**
 against 459 entries in the pinned Redis 8.10.2 metadata. This is neither a
 behavior pass rate nor a percentage of Redis completed. Run
 `powershell -File scripts/command_coverage.ps1 -RedisSource PATH_TO_REDIS_8_10_2`
 from the repository root to reproduce the count. Many options and error cases
 within those entries remain unsupported.
+
+`LMPOP` and `BLMPOP` choose the first nonempty key in argument order and return
+the popped members in left or right pop order. `BLMOVE` and `BRPOPLPUSH` move
+one element atomically and block on a missing source. Timeout `0` waits
+indefinitely outside transactions; inside MULTI/EXEC these commands return
+immediately. Waiting clients do not yet have Redis's FIFO ordering guarantee.
 
 WATCH tracks writes even if the resulting value is unchanged, missing-key
 creation/deletion, and natural expiry. EXEC and DISCARD clear the connection's
@@ -148,7 +154,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **136 tests**: 10 unit tests and 126 server integration tests.
+The local suite has **138 tests**: 10 unit tests and 128 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,

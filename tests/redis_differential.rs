@@ -32,6 +32,9 @@ fn representative_resp2_sequences_match_a_real_redis_server() {
         b"reru-diff:stream",
         b"reru-diff:copy",
         b"reru-diff:bitfield",
+        b"reru-diff:list-more",
+        b"reru-diff:list-more-dest",
+        b"reru-diff:missing-list",
         b"reru-diff:zalg-a",
         b"reru-diff:zalg-b",
         b"reru-diff:zalg-out",
@@ -82,6 +85,44 @@ fn representative_resp2_sequences_match_a_real_redis_server() {
         &[b"BRPOP", b"reru-diff:list2", b"0.1"],
         &[b"LRANGE", b"reru-diff:list", b"0", b"-1"],
         &[b"LRANGE", b"reru-diff:list2", b"0", b"-1"],
+    ] {
+        compare(&mut ours, &mut redis, command);
+    }
+
+    for command in [
+        &[
+            b"RPUSH".as_slice(),
+            b"reru-diff:list-more",
+            b"a",
+            b"b",
+            b"c",
+            b"d",
+        ] as &[&[u8]],
+        &[
+            b"LMPOP",
+            b"2",
+            b"reru-diff:missing-list",
+            b"reru-diff:list-more",
+            b"LEFT",
+            b"COUNT",
+            b"2",
+        ],
+        &[
+            b"BLMOVE",
+            b"reru-diff:list-more",
+            b"reru-diff:list-more-dest",
+            b"RIGHT",
+            b"LEFT",
+            b"0.05",
+        ],
+        &[
+            b"BRPOPLPUSH",
+            b"reru-diff:list-more",
+            b"reru-diff:list-more-dest",
+            b"0.05",
+        ],
+        &[b"BLMPOP", b"0.01", b"1", b"reru-diff:list-more", b"RIGHT"],
+        &[b"LRANGE", b"reru-diff:list-more-dest", b"0", b"-1"],
     ] {
         compare(&mut ours, &mut redis, command);
     }
