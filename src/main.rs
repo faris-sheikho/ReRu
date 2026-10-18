@@ -9,6 +9,7 @@ mod list_ops;
 mod persistence;
 mod protocol;
 mod pubsub;
+mod rdb;
 mod replication;
 mod sorted_sets;
 mod streams;
@@ -43,6 +44,7 @@ struct SharedStore {
     command_gate: Mutex<()>,
     snapshot_path: Option<PathBuf>,
     aof_path: Option<PathBuf>,
+    rdb: rdb::Persistence,
     replicas: Mutex<Vec<SyncSender<Vec<u8>>>>,
     read_only: bool,
     watched_keys: Mutex<HashMap<Vec<u8>, WatchRegistration>>,
@@ -197,6 +199,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
             b"PERSIST",
             b"FLUSHDB",
             b"FLUSHALL",
+            b"RESTORE",
         ]
         .iter()
         .any(|name| command[0].eq_ignore_ascii_case(name))
@@ -205,6 +208,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
 fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
     // Collection handlers record real changes themselves, including no-op checks.
     if cache::valid_arity(command).is_some()
+        || rdb::valid_arity(command).is_some()
         || geo::valid_arity(command).is_some()
         || list_ops::valid_arity(command).is_some()
         || bitmaps::valid_arity(command).is_some()
@@ -952,6 +956,8 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
         response
     } else if let Some(response) = cache::execute(command, store) {
         response
+    } else if let Some(response) = rdb::execute(command, store) {
+        response
     } else if let Some(response) = geo::execute(command, store) {
         response
     } else if let Some(response) = list_ops::execute(command, store) {
@@ -1551,6 +1557,10 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
         valid
     } else if let Some(valid) = cache::valid_arity(command) {
         valid
+    } else if name.eq_ignore_ascii_case(b"SAVE") || name.eq_ignore_ascii_case(b"BGSAVE") {
+        return Err(protocol::error("Command not allowed inside a transaction"));
+    } else if let Some(valid) = rdb::valid_arity(command) {
+        valid
     } else if let Some(valid) = geo::valid_arity(command) {
         valid
     } else if let Some(valid) = list_ops::valid_arity(command) {
@@ -1803,6 +1813,8 @@ fn main() -> io::Result<()> {
     let mut port = 6379;
     let mut snapshot_path = None;
     let mut aof_path = None;
+    let mut rdb_dir = None;
+    let mut rdb_filename = None;
     let mut replica_of = None;
     let mut maxmemory = 0;
     let mut maxmemory_policy = eviction::Policy::NoEviction;
@@ -1811,7 +1823,7 @@ fn main() -> io::Result<()> {
         let value = args.get(index + 1).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
+                "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--dir DIR] [--dbfilename FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
             )
         })?;
         match args[index].as_str() {
@@ -1822,6 +1834,14 @@ fn main() -> io::Result<()> {
             }
             "--snapshot" => snapshot_path = Some(PathBuf::from(value)),
             "--appendonly" => aof_path = Some(PathBuf::from(value)),
+            "--dir" => rdb_dir = Some(PathBuf::from(value)),
+            "--dbfilename" => {
+                let path = PathBuf::from(value);
+                if path.components().count() != 1 || path.file_name().is_none() {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "--dbfilename must be a filename"));
+                }
+                rdb_filename = Some(path);
+            }
             "--maxmemory" => {
                 maxmemory = eviction::parse_size(value).ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "invalid --maxmemory size")
@@ -1848,13 +1868,28 @@ fn main() -> io::Result<()> {
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
+                    "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--dir DIR] [--dbfilename FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
                 ))
             }
         }
         index += 2;
     }
 
+    let rdb_path = if rdb_dir.is_some() || rdb_filename.is_some() {
+        Some(
+            rdb_dir
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(rdb_filename.unwrap_or_else(|| PathBuf::from("dump.rdb"))),
+        )
+    } else {
+        None
+    };
+    if rdb_path.is_some() && (snapshot_path.is_some() || aof_path.is_some()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "RDB mode cannot be combined with --snapshot or --appendonly",
+        ));
+    }
     if aof_path.is_some() && (snapshot_path.is_some() || replica_of.is_some()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1865,6 +1900,8 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let entries = if let Some(path) = &snapshot_path {
         persistence::load(path)?
+    } else if let Some(path) = &rdb_path {
+        rdb::load(path)?
     } else {
         HashMap::new()
     };
@@ -1874,6 +1911,7 @@ fn main() -> io::Result<()> {
         command_gate: Mutex::new(()),
         snapshot_path,
         aof_path,
+        rdb: rdb::Persistence::new(rdb_path),
         replicas: Mutex::new(Vec::new()),
         read_only: replica_of.is_some(),
         watched_keys: Mutex::new(HashMap::new()),

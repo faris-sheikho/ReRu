@@ -9,7 +9,10 @@ partial INFO memory/stats, keyspace and collection scans, and expiry inspection 
 ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
 local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
-The latest increment adds sorted-set multi-key and blocking pops plus initial
+The latest increment adds an initial Redis RDB codec, SAVE/BGSAVE/LASTSAVE,
+DUMP/RESTORE, and full-file interoperability checks. It supports common
+collection encodings, checksums and key expiry; unsupported types fail explicitly.
+The preceding increment added sorted-set multi-key and blocking pops plus initial
 geospatial storage and search, plus single-database flush operations. Earlier
 increments added floating-point string increments, the legacy SUBSTR alias,
 server TIME, blocking list moves and
@@ -30,7 +33,7 @@ not been selected.
 - Compare observable behavior against a real Redis server and keep regression
   tests for every command before marking it complete.
 - Track command-name presence separately from verified behavior and subsystem
-  coverage. The current 170/459 metadata entries (37.0%) do not establish
+  coverage. The current 175/459 metadata entries (38.1%) do not establish
   30–40% implementation of Redis.
 - Keep the server usable after every small, tested commit.
 
@@ -42,8 +45,9 @@ not been selected.
    results.
 3. Expand transaction compatibility testing, Pub/Sub coverage, scripting, and
    the remaining keyspace commands.
-4. Add Redis-compatible RDB and full AOF persistence with rewrite, restart,
-   configuration, and recovery tests.
+4. Expand RDB to streams, legacy encodings and modern Redis types; add save
+   scheduling and broader crash recovery. Complete AOF rewrite, configuration,
+   multipart manifests, and interoperability.
 5. Add Redis PSYNC replication, failover, clustering, authentication, and
    configuration.
 6. Bring maxmemory accounting and eviction internals closer to Redis, then add RESP3, performance and resource controls, operational tooling, and
@@ -55,6 +59,9 @@ not been selected.
   write using a ReRu-specific format; it is not Redis RDB. `--appendonly FILE`
   offers single-file RESP command batches with fsync per batch; it lacks Redis
   multipart AOF and rewrite behavior and cannot be combined with snapshots or replicas.
+- Explicit `--dir`/`--dbfilename` enables Redis RDB startup loading and manual
+  SAVE/BGSAVE. The supported subset exchanges files with Redis 7.0.15;
+  stream/legacy/new specialized encodings and automatic saves remain pending.
 - Replicas use full snapshot transfer on each write and resynchronize after a
   disconnect. They do not support Redis PSYNC, offsets, or backlog recovery.
   Custom replication frames carry changed-key metadata for replica `WATCH`;

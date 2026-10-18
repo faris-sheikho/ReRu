@@ -10,6 +10,7 @@ cargo run
 cargo test
 cargo run -- --port 6380 --snapshot ./reru.snap
 cargo run -- --port 6380 --appendonly ./reru.aof
+cargo run -- --port 6380 --dir . --dbfilename dump.rdb
 cargo run -- --port 6381 --replicaof 127.0.0.1 6380
 cargo run -- --maxmemory 64mb --maxmemory-policy allkeys-lru
 ```
@@ -20,6 +21,11 @@ after writes and restores it on startup. Its file format is specific to ReRu.
 `--appendonly FILE` instead writes RESP command transactions and replays them on
 startup. It fsyncs each committed batch. It cannot currently be combined with
 `--snapshot` or `--replicaof`.
+`--dir DIR --dbfilename FILE` enables Redis RDB loading at startup. `SAVE` and
+`BGSAVE` write snapshots explicitly; there is no automatic save schedule yet.
+RDB supports strings, lists, hashes, sets, sorted sets, and key expiry. Streams
+and other unsupported encodings fail with an error. RDB mode is separate from
+the custom snapshot and AOF modes.
 `--replicaof` starts a read-only ReRu replica that resynchronizes from the primary.
 `--maxmemory` uses a ReRu dataset-size estimate. Its policies are `noeviction`
 (default), `allkeys-lru`, `allkeys-lrm`, `allkeys-lfu`, `allkeys-random`,
@@ -64,13 +70,18 @@ count. These memory figures are not the process's actual RAM use.
   `PUBSUB` introspection; `QUIT` closes a client connection
 - Optional append-only persistence with restart and partial-tail recovery;
   `EXPIREAT` and `PEXPIREAT` for absolute key expiry
+- Initial Redis RDB interoperability, `SAVE`, `BGSAVE`, `LASTSAVE`, `DUMP`, and
+  `RESTORE` with `REPLACE`/`ABSTTL`; `INFO persistence` reports save status
 
-170 Redis command metadata entries have an implementation path, with limitations
-documented in the [compatibility status](docs/COMPATIBILITY.md). This is 37.0%
+175 Redis command metadata entries have an implementation path, with limitations
+documented in the [compatibility status](docs/COMPATIBILITY.md). This is 38.1%
 of the 459 entries in the pinned Redis 8.10.2 command metadata, **not** a
 Redis compatibility percentage. ReRu replication uses the custom
 `RERUREP1` framing protocol; primary and replicas must run matching builds.
 
-Redis RDB and full Redis AOF compatibility, PSYNC replication, clustering, authentication,
+Full RDB/AOF compatibility, PSYNC replication, clustering, authentication,
 production-grade memory accounting, and many commands remain. See the [roadmap](docs/ROADMAP.md) and
 [team implementation plan](docs/ReRu_Implementation_Plan.pdf).
+
+Optional [Rea development workflow](docs/REA_WORKFLOW.md) documents analysis setup
+and repeatable Redis interoperability checks. Rea is not a runtime dependency.

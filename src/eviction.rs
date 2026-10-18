@@ -151,6 +151,9 @@ pub fn info(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
             store.eviction.evicted_keys.load(Ordering::Relaxed)
         ));
     }
+    if section.is_none_or(|name| name.eq_ignore_ascii_case(b"persistence")) {
+        report.push_str(&crate::rdb::info(store));
+    }
     protocol::bulk(report.as_bytes())
 }
 
@@ -174,6 +177,28 @@ pub fn execute_config(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
             {
                 output.push(name.to_vec());
                 output.push(value.into_bytes());
+            }
+        }
+        if let Some(path) = &store.rdb.path {
+            for (name, value) in [
+                (
+                    b"dir".as_slice(),
+                    path.parent()
+                        .unwrap_or_else(|| std::path::Path::new("."))
+                        .to_string_lossy(),
+                ),
+                (
+                    b"dbfilename".as_slice(),
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                ),
+            ] {
+                if command[2..]
+                    .iter()
+                    .any(|pattern| matches_pattern(pattern, name))
+                {
+                    output.push(name.to_vec());
+                    output.push(value.as_bytes().to_vec());
+                }
             }
         }
         return protocol::array(&output);
@@ -366,6 +391,9 @@ impl Eviction {
         } else if name.eq_ignore_ascii_case(b"PING")
             || name.eq_ignore_ascii_case(b"ECHO")
             || name.eq_ignore_ascii_case(b"TIME")
+            || name.eq_ignore_ascii_case(b"SAVE")
+            || name.eq_ignore_ascii_case(b"BGSAVE")
+            || name.eq_ignore_ascii_case(b"LASTSAVE")
             || name.eq_ignore_ascii_case(b"FLUSHDB")
             || name.eq_ignore_ascii_case(b"FLUSHALL")
             || name.eq_ignore_ascii_case(b"CONFIG")

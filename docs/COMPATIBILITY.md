@@ -20,11 +20,12 @@ tests; it does not certify complete compatibility with Redis.
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB` | Binary channels/messages, glob patterns, RESP2 subscribed mode, CHANNELS/NUMSUB/NUMPAT; local process only |
 | Connection close | `QUIT` | Replies OK and closes the connection |
-| Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy` only; exact names and basic glob patterns for GET |
-| Observability | `INFO` | Partial `memory` and `stats` sections; estimated logical bytes and eviction count |
+| Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy`; GET also reports configured RDB dir/dbfilename |
+| Observability | `INFO` | Partial `memory`, `stats`, and `persistence` sections |
 | Server time | `TIME` | Epoch seconds and microseconds as RESP2 bulk strings |
+| Persistence | `SAVE`, `BGSAVE`, `LASTSAVE`, `DUMP`, `RESTORE` | Initial Redis RDB interoperability; supported values, key expiry, checksums, REPLACE/ABSTTL |
 
-Total: **170 Redis command metadata entries**, or **37.0% name presence**
+Total: **175 Redis command metadata entries**, or **38.1% name presence**
 against 459 entries in the pinned Redis 8.10.2 metadata. This is neither a
 behavior pass rate nor a percentage of Redis completed. Run
 `powershell -File scripts/command_coverage.ps1 -RedisSource PATH_TO_REDIS_8_10_2`
@@ -133,6 +134,31 @@ tag; new builds read older tags, but older builds cannot read new snapshots.
 
 ## Persistence and replication
 
+- `--dir DIR --dbfilename FILE` loads Redis RDB at startup. `SAVE` writes
+  synchronously; `BGSAVE` clones the dataset under the command lock and writes
+  from a worker thread. A unique temporary file is synced and renamed over the
+  destination only after complete encoding. `LASTSAVE` and `INFO persistence`
+  report successful save time, in-progress state and last save status.
+- The RDB codec writes version 10 and accepts headers 6 through 15 only for
+  supported encodings: plain strings/lists/sets/hashes/binary-score sorted sets,
+  integer and LZF strings, intsets, hash/zset/set listpacks, and quicklist2
+  lists. CRC64 is verified (zero file checksums are allowed by the format).
+  Geo data and bitmaps round-trip through their underlying zsets and strings.
+  Expiry is stored as an absolute timestamp; expired keys are omitted on load.
+- RDB streams, zipmaps/ziplists/old quicklists, textual-score zsets, field TTL,
+  modules, functions, newer specialized types, and nonzero databases are not
+  supported. Loading these fails explicitly. Saving a dataset containing a
+  stream fails without replacing the existing file. Header acceptance does not
+  establish compatibility with every encoding of that Redis version.
+- `DUMP`/`RESTORE` transfer the same supported value types. RESTORE supports
+  millisecond TTL, `REPLACE` and `ABSTTL`; `IDLETIME`/`FREQ` remain unsupported.
+  Restored writes participate in WATCH, transactions, maxmemory, AOF and
+  ReRu replication. Invalid payloads leave existing destination data intact.
+- RDB files and decoded string budgets are capped at 256 MiB, and key and
+  collection counts at one million. There is no save schedule, shutdown save,
+  automatic backup recovery, directory fsync, or AOF/RDB combination. SAVE
+  and BGSAVE require explicit RDB configuration and are rejected inside MULTI.
+  BGSAVE uses an in-memory copy, so large datasets can temporarily double RAM.
 - Optional `--snapshot FILE` saves strings, lists, streams, hashes, sets, sorted sets and absolute expiry
   deadlines and restores them at startup. EXPIRE, PERSIST and DEL changes are
   included. This is the custom `RERUSNP1` format, not Redis RDB or AOF.
@@ -169,7 +195,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **148 tests**: 10 unit tests and 138 server integration tests.
+The local suite has **156 tests**: 13 unit tests and 143 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,
@@ -185,13 +211,23 @@ It passed against a local Redis 7.0.15 instance with
 Without the environment variable, that test skips its comparisons. The pinned
 8.10.2 release and a much broader behavior corpus still need verification.
 
+RDB integration tests cover save/restart, background saving, binary data,
+TTL, invalid checksums, failed replacement, WATCH, transactions, OOM rollback,
+and AOF restart. With `RERU_REDIS_REFERENCE_PORT` set, the RDB suite exchanges
+DUMP payloads with Redis 7.0.15, including compressed and integer strings,
+quicklist2, intset, hash listpack and sorted-set listpack encodings. Without
+that variable, this second reference-dependent test also skips comparisons.
+`scripts/test_rdb_interop.py` additionally creates dedicated temporary servers,
+exchanges complete RDB files in both directions, and runs `redis-check-rdb`.
+Run instructions are in [the development workflow](REA_WORKFLOW.md).
+
 ## Remaining major work
 
-Additional sorted-set and bitmap commands, geospatial commands, stream consumer groups,
-pub/sub, scripting, broader command options, Redis RDB/AOF, PSYNC, authentication,
+Additional sorted-set and bitmap commands, geo indexing, stream consumer groups,
+sharded Pub/Sub, scripting, broader command options, full Redis RDB/AOF, PSYNC, authentication,
 ACLs, RESP3, cluster/failover, Redis-exact eviction internals, bounded resource usage and performance engineering
 remain. Blocking clients do not yet receive Redis's FIFO waiter guarantees.
-Hash field expiry, HSCAN, HINCRBYFLOAT, set scans, and broader list and set
+Hash field expiry and broader hash, list and set
 command options are also pending.
 
 Behavior references: [HSET](https://redis.io/docs/latest/commands/hset/),
