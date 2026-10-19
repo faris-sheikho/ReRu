@@ -1,9 +1,172 @@
 use crate::{execute_command, protocol, Entry, Store, Value};
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::{self, BufReader, Seek, Write};
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+static REWRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub struct Rewrite {
+    running: AtomicBool,
+    last_ok: AtomicBool,
+    completed: AtomicU64,
+    base_size: AtomicU64,
+}
+
+impl Default for Rewrite {
+    fn default() -> Self {
+        Self {
+            running: AtomicBool::new(false),
+            last_ok: AtomicBool::new(true),
+            completed: AtomicU64::new(0),
+            base_size: AtomicU64::new(0),
+        }
+    }
+}
+
+pub fn info(store: &Store) -> String {
+    let state = &store.aof_rewrite;
+    let size = store
+        .aof_path
+        .as_ref()
+        .and_then(|path| fs::metadata(path).ok())
+        .map_or(0, |metadata| metadata.len());
+    format!("aof_enabled:{}\r\naof_rewrite_in_progress:{}\r\naof_last_bgrewrite_status:{}\r\naof_rewrites:{}\r\naof_current_size:{size}\r\naof_base_size:{}\r\n\r\n",
+        u8::from(store.aof_path.is_some()),
+        u8::from(state.running.load(Ordering::Acquire)),
+        if state.last_ok.load(Ordering::Relaxed) { "ok" } else { "err" },
+        state.completed.load(Ordering::Relaxed),
+        state.base_size.load(Ordering::Relaxed))
+}
+
+struct Temporary(PathBuf);
+impl Drop for Temporary {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+// Caller holds command_gate so no append can race with copying the tail or
+// replacing the file. Close all handles before rename for Windows compatibility.
+fn install_rewrite(path: &Path, temporary: &Path, offset: u64) -> io::Result<u64> {
+    let mut original = File::open(path)?;
+    if original.metadata()?.len() < offset {
+        return Err(invalid("AOF shrank during rewrite"));
+    }
+    original.seek(SeekFrom::Start(offset))?;
+    let mut output = OpenOptions::new().append(true).open(temporary)?;
+    io::copy(&mut original, &mut output)?;
+    output.sync_all()?;
+    let size = output.metadata()?.len();
+    drop(original);
+    drop(output);
+    fs::rename(temporary, path)?;
+    // Sync the directory entry after rename on Unix. Windows directory fsync is
+    // unavailable through std; power-loss durability there is filesystem-dependent.
+    #[cfg(unix)]
+    File::open(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?
+    .sync_all()?;
+    Ok(size)
+}
+
+fn rewrite_file(
+    path: &Path,
+    entries: HashMap<Vec<u8>, Entry>,
+    offset: u64,
+    store: &Store,
+) -> io::Result<u64> {
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| invalid("invalid AOF filename"))?
+        .to_os_string();
+    name.push(format!(
+        ".rewrite-{}-{}.tmp",
+        std::process::id(),
+        REWRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temporary_path = path.with_file_name(name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)?;
+    let temporary = Temporary(temporary_path);
+    let result = (|| {
+        let mut output = Vec::new();
+        command(&mut output, &[b"MULTI"]);
+        file.write_all(&output)?;
+        let now = Instant::now();
+        for (key, entry) in entries {
+            if entry.expires_at.is_some_and(|deadline| deadline <= now) {
+                continue;
+            }
+            output.clear();
+            append_value(&mut output, &key, &entry)?;
+            file.write_all(&output)?;
+        }
+        output.clear();
+        command(&mut output, &[b"EXEC"]);
+        file.write_all(&output)?;
+        file.sync_all()
+    })();
+    drop(file);
+    result?;
+    let _gate = store.command_gate.lock().unwrap();
+    install_rewrite(path, &temporary.0, offset)
+}
+
+// Caller holds command_gate while taking the snapshot and its matching log offset.
+pub fn bgrewrite(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
+    if command.len() != 1 {
+        return protocol::error("wrong number of arguments for 'bgrewriteaof' command");
+    }
+    let Some(path) = store.aof_path.clone() else {
+        return protocol::error("BGREWRITEAOF requires --appendonly FILE in ReRu");
+    };
+    if store.aof_rewrite.running.swap(true, Ordering::AcqRel) {
+        return protocol::error("Background append only file rewriting already in progress");
+    }
+    let offset = match fs::metadata(&path) {
+        Ok(metadata) => metadata.len(),
+        Err(_) => {
+            store.aof_rewrite.last_ok.store(false, Ordering::Relaxed);
+            store.aof_rewrite.running.store(false, Ordering::Release);
+            return protocol::error("Cannot read append only file");
+        }
+    };
+    let entries = store.entries.lock().unwrap().clone();
+    let worker_store = Arc::clone(store);
+    let result = std::thread::Builder::new()
+        .name("aof-rewrite".into())
+        .spawn(move || {
+            let result = rewrite_file(&path, entries, offset, &worker_store);
+            let state = &worker_store.aof_rewrite;
+            match result {
+                Ok(size) => {
+                    state.base_size.store(size, Ordering::Relaxed);
+                    state.completed.fetch_add(1, Ordering::Relaxed);
+                    state.last_ok.store(true, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    state.last_ok.store(false, Ordering::Relaxed);
+                    eprintln!("AOF rewrite failed: {error}");
+                }
+            }
+            state.running.store(false, Ordering::Release);
+        });
+    if result.is_err() {
+        store.aof_rewrite.last_ok.store(false, Ordering::Relaxed);
+        store.aof_rewrite.running.store(false, Ordering::Release);
+        return protocol::error("Cannot start append only file rewrite");
+    }
+    b"+Background append only file rewriting started\r\n".to_vec()
+}
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -169,12 +332,55 @@ pub fn replay(path: &Path, store: &Store) -> io::Result<()> {
         reader.get_mut().set_len(committed)?;
     }
     store.pending_keys.lock().unwrap().clear();
+    store
+        .aof_rewrite
+        .base_size
+        .store(reader.get_ref().metadata()?.len(), Ordering::Relaxed);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::command;
+    use super::*;
+
+    fn paths() -> (PathBuf, PathBuf) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("reru-rewrite-{}-{unique}", std::process::id()));
+        let temporary = base.with_extension("tmp");
+        (base, temporary)
+    }
+
+    #[test]
+    fn rewrite_installs_compacted_base_plus_exact_concurrent_tail() {
+        let (path, temp) = paths();
+        fs::write(&path, b"old-historynew-writes\0\xff").unwrap();
+        fs::write(&temp, b"compacted-base").unwrap();
+        let expected = b"compacted-basenew-writes\0\xff";
+        assert_eq!(
+            install_rewrite(&path, &temp, 11).unwrap(),
+            expected.len() as u64
+        );
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        assert!(!temp.exists());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn truncated_source_aborts_rewrite_without_replacing_original() {
+        let (path, temp) = paths();
+        fs::write(&path, b"keep-original").unwrap();
+        fs::write(&temp, b"replacement").unwrap();
+        let guard = Temporary(temp.clone());
+        assert!(install_rewrite(&path, &temp, 100).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"keep-original");
+        drop(guard);
+        assert!(!temp.exists());
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn writes_resp_arrays() {

@@ -19,6 +19,14 @@ fn representative_resp2_sequences_match_a_real_redis_server() {
     let server = common::Server::start();
     let mut ours = Client::new(&server);
     let mut redis = Client::on_port(port);
+    for command in [
+        vec![b"AUTH".as_slice(), b"unused"],
+        vec![b"AUTH", b"default", b"unused"],
+        vec![b"AUTH", b"Default", b"unused"],
+        vec![b"ACL", b"WHOAMI"],
+    ] {
+        compare(&mut ours, &mut redis, &command);
+    }
     let keys = [
         b"reru-diff:string".as_slice(),
         b"reru-diff:number",

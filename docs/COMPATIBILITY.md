@@ -20,12 +20,13 @@ tests; it does not certify complete compatibility with Redis.
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB` | Binary channels/messages, glob patterns, RESP2 subscribed mode, CHANNELS/NUMSUB/NUMPAT; local process only |
 | Connection close | `QUIT` | Replies OK and closes the connection |
-| Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory`, `maxmemory-policy`, and `maxclients`; GET also reports configured RDB dir/dbfilename |
+| Authentication | `AUTH`, `ACL WHOAMI` | Startup-configured password for the default user, connection-local authentication and authenticated ReRu replication |
+| Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory`, `maxmemory-policy`, and `maxclients`; GET also reports AOF enabled/fsync mode and configured RDB dir/dbfilename |
 | Observability | `INFO` | Partial `memory`, `stats`, `clients`, and `persistence` sections |
 | Server time | `TIME` | Epoch seconds and microseconds as RESP2 bulk strings |
-| Persistence | `SAVE`, `BGSAVE`, `LASTSAVE`, `DUMP`, `RESTORE` | Initial Redis RDB interoperability; supported values, key expiry, checksums, REPLACE/ABSTTL |
+| Persistence | `SAVE`, `BGSAVE`, `LASTSAVE`, `DUMP`, `RESTORE`, `BGREWRITEAOF` | Initial Redis RDB interoperability; supported values, key expiry, checksums, REPLACE/ABSTTL; manual single-file AOF compaction |
 
-Total: **175 Redis command metadata entries**, or **38.1% name presence**
+Total: **178 Redis command metadata entries**, or **38.8% name presence**
 against 459 entries in the pinned Redis 8.10.2 metadata. This is neither a
 behavior pass rate nor a percentage of Redis completed. Run
 `powershell -File scripts/command_coverage.ps1 -RedisSource PATH_TO_REDIS_8_10_2`
@@ -195,9 +196,9 @@ tag; new builds read older tags, but older builds cannot read new snapshots.
   It preserves binary data, types, and absolute expiry across restarts, and
   truncates an incomplete final batch. Each batch is synced to disk before the
   command response. This is a simple single-file AOF subset; it does not
-  implement Redis 7 multipart AOF manifests, background rewrite, configurable
+  implement Redis 7 multipart AOF manifests, automatic rewrite thresholds, configurable
   fsync policy, or arbitrary external AOF import. It cannot be combined with
-  `--snapshot` or `--replicaof` yet. Files can grow without bound.
+  `--snapshot` or `--replicaof` yet. Without manual compaction, files grow with writes.
 - Optional `--replicaof HOST PORT` provides read-only ReRu replicas, initial
   synchronization, subsequent full dataset snapshots and reconnection.
 - Replication uses custom `RERUREP1` frames with changed-key metadata. Use matching
@@ -205,6 +206,63 @@ tag; new builds read older tags, but older builds cannot read new snapshots.
   WAIT and failover are not implemented.
 - Persistence errors do not roll back the in-memory command. Disk failure
   recovery and configurable durability policy need further work.
+
+### AOF compaction
+
+`BGREWRITEAOF` requires AOF mode and starts a Rust worker thread. ReRu clones the
+dataset and records the current AOF offset under the command gate. The worker
+writes a compact RESP transaction to a unique adjacent temporary file. Client
+writes continue appending to the original file. At installation, the worker
+locks the command gate, copies the exact appended tail, syncs the temporary file,
+closes handles, and renames it over the original. Errors before replacement leave
+the original AOF intact; ordinary errors clean up the temporary file. Process
+termination may leave an unused temporary file, which startup ignores. Unix also
+syncs the containing directory; a directory-sync error after rename reports an
+error even though replacement has occurred. Windows power-loss durability needs
+further validation.
+
+The worker preserves supported types, absolute expiry and stream last-generated
+IDs. Only one rewrite can run at a time. It is rejected inside MULTI and when
+AOF is disabled. ReRu does not implement Redis's RDB/rewrite scheduling or
+multipart manifest protocol. Dataset cloning temporarily increases memory usage;
+the initial clone and final tail copy/fsync block commands. Large workloads still
+need performance and crash-fault testing.
+
+`INFO persistence` adds `aof_enabled`, `aof_rewrite_in_progress`,
+`aof_last_bgrewrite_status`, `aof_rewrites` (successful rewrites since startup),
+`aof_current_size`, and `aof_base_size` (size at startup or last successful rewrite).
+`CONFIG GET appendonly` and `CONFIG GET appendfsync` report the startup mode and
+fixed `always` fsync policy; changing these through CONFIG SET is unsupported.
+
+Behavior reference: [Redis BGREWRITEAOF](https://redis.io/docs/latest/commands/bgrewriteaof/).
+
+## Authentication
+
+`--requirepass PASSWORD` or `--requirepass-file FILE` configures the default
+user's password at startup. An empty password means nopass mode. Files are limited
+to 4096 bytes and strip a single trailing LF or CRLF; remaining bytes, including
+spaces and binary bytes, are part of the password. The last supplied password
+option wins. Prefer file options to avoid credentials appearing in process arguments.
+
+Unauthenticated connections receive NOAUTH for commands other than AUTH and QUIT,
+including replication handshakes, subscriptions, configuration and transactions.
+`AUTH password` and `AUTH default password` authenticate one connection. Invalid
+credentials return WRONGPASS and preserve any existing authenticated session.
+With no configured password, named default-user AUTH succeeds, while legacy
+password-only AUTH returns Redis's no-password error. AUTH can be queued in an
+authenticated transaction and is rejected in RESP2 subscribed mode. `ACL WHOAMI`
+returns `default`; no other ACL subcommands or per-user rules are implemented.
+
+`--masterauth PASSWORD` or `--masterauth-file FILE` authenticates a replica to its
+primary before the custom REPLSYNC handshake, including reconnects. Replica client
+passwords are independent. Wrong upstream credentials prevent synchronization.
+Secrets are not included in persistence, CONFIG GET or INFO output.
+Comparison uses the `subtle` crate; configured secrets remain in process memory.
+There is no TLS, authentication rate limiter, password rotation, ACL persistence,
+multi-user support, or runtime CONFIG SET requirepass/masterauth yet.
+
+Behavior references: [AUTH](https://redis.io/docs/latest/commands/auth/) and
+[ACL WHOAMI](https://redis.io/docs/latest/commands/acl-whoami/).
 
 ## Pub/Sub
 
@@ -221,7 +279,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **164 tests**: 14 unit tests and 150 server integration tests.
+The local suite has **175 tests**: 16 unit tests and 159 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,
@@ -234,6 +292,14 @@ and cancelled TTLs, OOM rollback, WATCH invalidation, restart index rebuilding,
 AOF/snapshot deletion and replica propagation. Client-limit tests check rejection,
 QUIT/disconnect/malformed-request cleanup, atomic configuration validation, and
 lowering/raising limits without dropping existing clients.
+AOF rewrite tests cover log compaction, all supported types, binary values,
+expiry and stream ID preservation, writes/transactions/flush during rewriting,
+restart, exact appended-tail copying, failed replacement, command validation,
+status fields and retry after an unavailable source file.
+Authentication tests cover pre-auth command/replication rejection, per-connection
+state, failed reauthentication, transactions, subscriptions, binary password files,
+restart, credential exclusion from AOF, and protected primary/replica connections.
+The differential suite also checks nopass AUTH and ACL WHOAMI against Redis.
 
 The suite includes an optional deterministic RESP2 differential test covering
 representative strings, lists, hashes, sets, sorted sets, streams, and transactions.
@@ -255,8 +321,8 @@ Run instructions are in [the development workflow](REA_WORKFLOW.md).
 ## Remaining major work
 
 Additional sorted-set and bitmap commands, geo indexing, stream consumer groups,
-sharded Pub/Sub, scripting, broader command options, full Redis RDB/AOF, PSYNC, authentication,
-ACLs, RESP3, cluster/failover, Redis-exact eviction internals, bounded resource usage and performance engineering
+sharded Pub/Sub, scripting, broader command options, full Redis RDB/AOF, PSYNC,
+multi-user ACLs, TLS, RESP3, cluster/failover, Redis-exact eviction internals, bounded resource usage and performance engineering
 remain. Blocking clients do not yet receive Redis's FIFO waiter guarantees.
 Hash field expiry and broader hash, list and set
 command options are also pending.

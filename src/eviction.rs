@@ -168,6 +168,7 @@ pub fn info(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
     }
     if section.is_none_or(|name| name.eq_ignore_ascii_case(b"persistence")) {
         report.push_str(&crate::rdb::info(store));
+        report.push_str(&crate::aof::info(store));
     }
     protocol::bulk(report.as_bytes())
 }
@@ -180,6 +181,16 @@ pub fn execute_config(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
     if command[1].eq_ignore_ascii_case(b"GET") {
         let mut output = Vec::new();
         for (name, value) in [
+            (
+                b"appendonly".as_slice(),
+                if store.aof_path.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                }
+                .to_owned(),
+            ),
+            (b"appendfsync".as_slice(), "always".to_owned()),
             (b"maxmemory".as_slice(), settings.maxmemory.to_string()),
             (
                 b"maxclients".as_slice(),

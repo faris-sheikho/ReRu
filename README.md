@@ -1,93 +1,108 @@
 # ReRu
 
-A Redis-compatible cache and data structure server written in Rust.
-**0.1.0-alpha.1 is experimental**; ReRu is not a complete Redis replacement.
-See the [release notes](docs/RELEASE_NOTES.md) for scope and verification.
+**A Redis-compatible cache and data structure server written in Rust.**
 
-## Run
+ReRu implements Redis commands and persistence incrementally, with binary-safe
+RESP2 communication. The current version,
+`0.1.0-alpha.1`, is an **experimental preview**, not a production Redis replacement.
+
+[Compatibility](docs/COMPATIBILITY.md) · [Roadmap](docs/ROADMAP.md) · [Release notes](docs/RELEASE_NOTES.md)
+
+## Quick start
+
+Install a current stable Rust toolchain, then build and run:
 
 ```sh
-cargo run
-cargo test
-cargo run -- --port 6380 --snapshot ./reru.snap
-cargo run -- --port 6380 --appendonly ./reru.aof
-cargo run -- --port 6380 --dir . --dbfilename dump.rdb
-cargo run -- --port 6381 --replicaof 127.0.0.1 6380
-cargo run -- --maxmemory 64mb --maxmemory-policy allkeys-lru
-cargo run -- --maxclients 256
+git clone https://github.com/mansiverma897993/ReRu.git
+cd ReRu
+cargo build --release
+cargo run --release -- --port 6379 --maxmemory 64mb --maxmemory-policy allkeys-lru --maxclients 256
 ```
 
-The server listens on `127.0.0.1:6379`; use `--port PORT` to change the port.
-On Unix, `./your_program.sh` builds and starts it. `--snapshot` saves the dataset
-after writes and restores it on startup. Its file format is specific to ReRu.
-`--appendonly FILE` instead writes RESP command transactions and replays them on
-startup. It fsyncs each committed batch. It cannot currently be combined with
-`--snapshot` or `--replicaof`.
-`--dir DIR --dbfilename FILE` enables Redis RDB loading at startup. `SAVE` and
-`BGSAVE` write snapshots explicitly; there is no automatic save schedule yet.
-RDB supports strings, lists, hashes, sets, sorted sets, and key expiry. Streams
-and other unsupported encodings fail with an error. RDB mode is separate from
-the custom snapshot and AOF modes.
-`--replicaof` starts a read-only ReRu replica that resynchronizes from the primary.
-`--maxmemory` uses a ReRu dataset-size estimate. Its policies are `noeviction`
-(default), `allkeys-lru`, `allkeys-lrm`, `allkeys-lfu`, `allkeys-random`,
-`volatile-lru`, `volatile-lrm`, `volatile-lfu`, `volatile-random`, and
-`volatile-ttl`; the default limit is `0` (unlimited).
-`CONFIG GET/SET` can inspect and change these memory settings and `maxclients`
-at runtime. `--maxclients` defaults to 10000; excess connections receive an error.
-Idle expired keys are reclaimed by a background worker on primaries, with
-deletions recorded in the configured AOF/snapshot and sent to ReRu replicas.
-`INFO memory` and `INFO stats` report the estimated dataset size and eviction
-count. These memory figures are not the process's actual RAM use.
+Connect with `redis-cli` or a client configured for the supported RESP2 commands:
 
-## Current support
+```sh
+redis-cli SET greeting "Hello from ReRu" EX 60
+redis-cli GET greeting
+redis-cli TTL greeting
+```
 
-- RESP2, concurrent clients, strings, lists, streams, hashes, sets, and sorted sets; key expiry
-- `PING`, `ECHO`, `SET`, `GET`, `INCR`, `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP`, `BRPOP`, `TYPE`
-- Additional list editing and movement: `RPOP`, `LINDEX`, `LSET`, `LTRIM`,
-  `LINSERT`, `LPUSHX`, `RPUSHX`, `LMOVE`, `RPOPLPUSH`, `BLMOVE`,
-  `BRPOPLPUSH`, `LMPOP`, `BLMPOP`, `LPOS`, and `LREM`
-- Cache-oriented string operations: conditional/expiring `SET`, `GETEX`, `GETDEL`,
-  `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, legacy set variants,
-  integer and floating-point increments, `GETRANGE`, `SUBSTR`, and `SETRANGE`
-- `TIME` returns server epoch seconds and microseconds
-- Initial `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, and exact `XTRIM` support
-- Hash fields: `HSET`, `HGET`, multi-field operations, enumeration, deletion,
-  `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, and `HSCAN`
-- Set membership, removal, cardinality, intersection cardinality, random selection, moves, and
-  `SUNION`/`SINTER`/`SDIFF` with destination storing variants; `SSCAN`
-- Sorted-set insertion, score/rank lookup, score and lex bounded ranges, counts,
-  union/intersection/difference with store variants, range removal, `ZMSCORE`,
-  `ZSCAN`, `ZPOPMIN`, `ZPOPMAX`, `ZMPOP`, `BZMPOP`, `BZPOPMIN`, and `BZPOPMAX`
-- Bitmap operations on strings: `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`,
-  `BITPOS`, `BITFIELD`, and `BITFIELD_RO`
-- Geospatial storage and queries: `GEOADD`, `GEOPOS`, `GEOHASH`, `GEODIST`,
-  `GEOSEARCH`, and `GEOSEARCHSTORE`
-- Optional memory limit with OOM rejection and ten maxmemory policies
-- `CONFIG GET/SET` for `maxmemory`, `maxmemory-policy`, and `maxclients`
-- Background key expiry, bounded expiry batches, connection limits, and `INFO clients`
-- `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, and `PERSIST`
-- `FLUSHDB` and `FLUSHALL` clear ReRu's single database
-- `COPY`, `RENAME`, `RENAMENX`, `UNLINK`, `TOUCH`, and `DBSIZE`
-- `KEYS`, `SCAN`, `RANDOMKEY`, `EXPIRETIME`, and `PEXPIRETIME` for keyspace discovery
-- `MULTI`, `EXEC`, `DISCARD`, `WATCH`, and `UNWATCH`, including optimistic locking
-  on primary and replica connections
-- Pub/Sub: `PUBLISH`, channel and pattern subscriptions, unsubscribe, and basic
-  `PUBSUB` introspection; `QUIT` closes a client connection
-- Optional append-only persistence with restart and partial-tail recovery;
-  `EXPIREAT` and `PEXPIREAT` for absolute key expiry
-- Initial Redis RDB interoperability, `SAVE`, `BGSAVE`, `LASTSAVE`, `DUMP`, and
-  `RESTORE` with `REPLACE`/`ABSTTL`; `INFO persistence` reports save status
+The server listens on `127.0.0.1` only. The compiled executable is
+`target/release/reru` on Unix or `target\release\reru.exe` on Windows.
+Run it with `--help` for startup options.
 
-175 Redis command metadata entries have an implementation path, with limitations
-documented in the [compatibility status](docs/COMPATIBILITY.md). This is 38.1%
-of the 459 entries in the pinned Redis 8.10.2 command metadata, **not** a
-Redis compatibility percentage. ReRu replication uses the custom
-`RERUREP1` framing protocol; primary and replicas must run matching builds.
+## Features
 
-Full RDB/AOF compatibility, PSYNC replication, clustering, authentication,
-production-grade memory accounting, and many commands remain. See the [roadmap](docs/ROADMAP.md) and
-[team implementation plan](docs/ReRu_Implementation_Plan.pdf).
+| Area | Implemented scope |
+| --- | --- |
+| Data structures | Strings, lists, hashes, sets, sorted sets, bitmaps, initial streams and geospatial commands |
+| Cache behavior | Conditional writes, TTLs, background expiry, ten eviction policies and configurable memory estimates |
+| Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH` and `UNWATCH` |
+| Messaging | Local channel/pattern Pub/Sub and blocking list, sorted-set and stream reads |
+| Persistence | ReRu snapshots, single-file AOF with background compaction, and a subset of Redis RDB |
+| Replication | Read-only ReRu replicas using a custom full-snapshot protocol |
+| Operations | Client limits, runtime memory configuration and partial `INFO` metrics |
+| Authentication | Default-user passwords, `AUTH`, `ACL WHOAMI` and authenticated ReRu replication |
 
-Optional [Rea development workflow](docs/REA_WORKFLOW.md) documents analysis setup
-and repeatable Redis interoperability checks. Rea is not a runtime dependency.
+**178 of 459 command metadata entries** from Redis 8.10.2 have implementation
+paths: **38.8% command-name coverage**. This is not a measure of complete Redis
+behavior. Supported options, differences and tests are listed in the
+[compatibility inventory](docs/COMPATIBILITY.md).
+
+## Persistence
+
+Data stays in memory unless a persistence mode is selected. Choose one mode:
+
+| Startup options | Behavior |
+| --- | --- |
+| `--snapshot ./reru.snap` | Save after writes and restore at startup; ReRu-specific format |
+| `--appendonly ./reru.aof` | Append RESP transactions, fsync each batch, and replay at startup |
+| `--dir . --dbfilename dump.rdb` | Load supported Redis RDB data; save explicitly with `SAVE` or `BGSAVE` |
+
+With AOF enabled, `redis-cli BGREWRITEAOF` compacts write history in a background
+worker while preserving subsequent writes. Check `INFO persistence` for progress
+and status. Rewriting is manual; Redis multipart AOF and automatic rewrite
+thresholds are not implemented.
+
+`--replicaof 127.0.0.1 6379 --port 6380` starts a replica. Both servers must run
+matching ReRu builds; replication is not Redis PSYNC. AOF mode cannot be combined
+with replica mode.
+
+## Authentication
+
+Use `--requirepass-file ./password.txt` to require the default user's password.
+Connect with `redis-cli --askpass`. Password files accept up to 4096 bytes and
+strip one trailing line ending. Replicas use `--masterauth-file ./primary-password.txt`
+to authenticate upstream; their own client password is configured separately.
+The `--requirepass` and `--masterauth` flags also accept passwords directly.
+Authentication does not encrypt traffic; TLS and multi-user ACL policies remain pending.
+
+## Development
+
+```sh
+cargo test
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+```
+
+The suite contains **175 tests**, including authentication, restart, expiry, eviction,
+transaction, replication and AOF rewrite coverage. Two reference-dependent tests
+require `RERU_REDIS_REFERENCE_PORT` to run their Redis comparisons. Current
+interoperability checks use Redis 7.0.15; the complete Redis 8.10.2 behavior suite
+has not been validated. See the [development workflow](docs/REA_WORKFLOW.md)
+for reference-server and RDB file exchange checks.
+
+On Windows, `powershell -File scripts/package_windows.ps1` creates a preview ZIP
+and SHA-256 checksum under `target/releases`.
+
+## Project status
+
+ReRu is suitable for development and compatibility experiments. Remaining work
+includes multi-user ACLs, TLS, RESP3, Lua/functions, stream consumer groups,
+PSYNC, clustering/failover, complete RDB/AOF compatibility and performance tuning.
+Memory limits use a logical dataset estimate, not process RSS. Commands are
+serialized and each connection uses an operating-system thread.
+
+See the [roadmap](docs/ROADMAP.md) and [team implementation plan](docs/ReRu_Implementation_Plan.pdf)
+for the remaining work. Repository license selection is pending; dependency
+license notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

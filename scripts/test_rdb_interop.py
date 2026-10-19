@@ -103,7 +103,8 @@ def verify(left, right):
     ]:
         assert left.call(*query) == right.call(*query), query
     assert 0 < left.call("PTTL", "ttl") <= 60000
-    assert abs(left.call("PTTL", "ttl") - right.call("PTTL", "ttl")) < 1000
+    # Compare stored deadlines: native Windows and WSL wall clocks may differ.
+    assert abs(left.call("PEXPIRETIME", "ttl") - right.call("PEXPIRETIME", "ttl")) < 10
 
 
 def main():

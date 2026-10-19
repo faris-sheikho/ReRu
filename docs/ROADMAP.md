@@ -9,7 +9,11 @@ partial INFO memory/stats, keyspace and collection scans, and expiry inspection 
 ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
 local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
-The latest increment adds deadline-indexed background expiry, deletion propagation
+The latest increment adds manual BGREWRITEAOF compaction with concurrent-write
+preservation, AOF status/configuration inspection, and recovery tests. It also
+adds default-user AUTH, ACL WHOAMI, password-file startup configuration and
+authenticated connections from replicas to their primary.
+The preceding increment added deadline-indexed background expiry, deletion propagation
 and persistence, configurable client limits, and client/expiry INFO metrics.
 Version 0.1.0-alpha.1 is an experimental release candidate, not production readiness.
 The preceding increment added an initial Redis RDB codec, SAVE/BGSAVE/LASTSAVE,
@@ -36,7 +40,7 @@ not been selected.
 - Compare observable behavior against a real Redis server and keep regression
   tests for every command before marking it complete.
 - Track command-name presence separately from verified behavior and subsystem
-  coverage. The current 175/459 metadata entries (38.1%) do not establish
+  coverage. The current 178/459 metadata entries (38.8%) do not establish
   30–40% implementation of Redis.
 - Keep the server usable after every small, tested commit.
 
@@ -49,9 +53,9 @@ not been selected.
 3. Expand transaction compatibility testing, Pub/Sub coverage, scripting, and
    the remaining keyspace commands.
 4. Expand RDB to streams, legacy encodings and modern Redis types; add save
-   scheduling and broader crash recovery. Complete AOF rewrite, configuration,
+   scheduling and broader crash recovery. Add automatic AOF rewrite, configuration,
    multipart manifests, and interoperability.
-5. Add Redis PSYNC replication, failover, clustering, authentication, and
+5. Add Redis PSYNC replication, failover, clustering, multi-user ACLs, TLS, and
    configuration.
 6. Bring maxmemory accounting and eviction internals closer to Redis, then add RESP3, performance and resource controls, operational tooling, and
    compatibility testing at scale.
@@ -61,7 +65,9 @@ not been selected.
 - By default data is held only in memory. `--snapshot FILE` saves after each
   write using a ReRu-specific format; it is not Redis RDB. `--appendonly FILE`
   offers single-file RESP command batches with fsync per batch; it lacks Redis
-  multipart AOF and rewrite behavior and cannot be combined with snapshots or replicas.
+  multipart AOF and automatic rewrite scheduling and cannot be combined with snapshots or replicas.
+  Manual BGREWRITEAOF compacts the file, but cloning and final installation still
+  block commands and need performance work.
 - Explicit `--dir`/`--dbfilename` enables Redis RDB startup loading and manual
   SAVE/BGSAVE. The supported subset exchanges files with Redis 7.0.15;
   stream/legacy/new specialized encodings and automatic saves remain pending.

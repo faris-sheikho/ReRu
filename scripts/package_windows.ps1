@@ -18,7 +18,7 @@ try {
     $output = Join-Path $repo 'target/releases'
     New-Item -ItemType Directory -Force -Path $output | Out-Null
     $archive = Join-Path $output "ReRu-$version-windows-x86_64.zip"
-    $contents = @($binary, 'README.md', 'docs/COMPATIBILITY.md',
+    $contents = @($binary, 'README.md', 'THIRD_PARTY_NOTICES.md', 'docs/COMPATIBILITY.md',
         'docs/ROADMAP.md', 'docs/RELEASE_NOTES.md',
         'docs/REA_WORKFLOW.md', 'docs/ReRu_Implementation_Plan.pdf')
     # Preserve documentation paths and README relative links in the archive.

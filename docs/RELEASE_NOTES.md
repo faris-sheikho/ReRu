@@ -13,8 +13,12 @@
 - Configurable connection limits, connection statistics, `--help` and `--version`.
 - Custom snapshots, initial AOF, ReRu-to-ReRu replication, and a subset of Redis
   RDB including SAVE/BGSAVE and DUMP/RESTORE.
+- Manual BGREWRITEAOF compaction preserving concurrent writes, with AOF status
+  fields and read-only appendonly/appendfsync configuration inspection.
+- Default-user AUTH, ACL WHOAMI, password-file configuration and authenticated
+  ReRu replication; multi-user ACL rules and TLS remain pending.
 
-The command inventory has 175 of 459 Redis 8.10.2 metadata names (38.1%).
+The command inventory has 178 of 459 Redis 8.10.2 metadata names (38.8%).
 This measures names with implementation paths, not complete behavior or a
 percentage of Redis rebuilt. See [compatibility](COMPATIBILITY.md).
 
@@ -38,7 +42,7 @@ creating it does not publish a GitHub Release.
 
 ## Verification
 
-164 local tests cover the implemented subset, with optional real-server
+175 local tests cover the implemented subset, with optional real-server
 comparisons enabled against Redis 7.0.15. RDB file exchange is additionally
 checked in both directions with `redis-check-rdb`. Formatting, Clippy with
 warnings denied, and an optimized Windows build are release checks.
@@ -49,7 +53,7 @@ not been comprehensively validated.
 
 Full cache compatibility is unfinished: memory is estimated, command execution
 is serialized, expiry/persistence can block, and several memory/queue limits
-remain unbounded. Cluster, Sentinel/failover, PSYNC, authentication/ACLs, TLS,
+remain unbounded. Cluster, Sentinel/failover, PSYNC, multi-user ACLs, TLS,
 RESP3, scripting/functions, stream consumer groups, complete RDB/AOF support
 and many command options remain pending. Replication only connects matching
 ReRu builds. This preview is not a production Redis replacement.

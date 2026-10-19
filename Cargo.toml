@@ -7,3 +7,4 @@ repository = "https://github.com/mansiverma897993/ReRu"
 readme = "README.md"
 
 [dependencies]
+subtle = "=2.6.1"

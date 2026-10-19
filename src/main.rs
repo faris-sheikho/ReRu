@@ -1,4 +1,5 @@
 mod aof;
+mod auth;
 mod bitmaps;
 mod cache;
 mod clients;
@@ -46,6 +47,8 @@ struct SharedStore {
     command_gate: Mutex<()>,
     snapshot_path: Option<PathBuf>,
     aof_path: Option<PathBuf>,
+    aof_rewrite: aof::Rewrite,
+    auth: auth::Settings,
     rdb: rdb::Persistence,
     replicas: Mutex<Vec<SyncSender<Vec<u8>>>>,
     read_only: bool,
@@ -377,11 +380,26 @@ fn serve_replica(mut stream: TcpStream, store: &Store) -> io::Result<()> {
     Ok(())
 }
 
-fn follow_primary(address: String, store: Store) {
+fn follow_primary(address: String, store: Store, password: Option<Vec<u8>>) {
     loop {
         let result = (|| -> io::Result<()> {
             let mut stream = TcpStream::connect(&address)?;
             stream.set_nodelay(true)?;
+            if let Some(password) = &password {
+                stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+                stream.write_all(&protocol::array(&[b"AUTH".to_vec(), password.clone()]))?;
+                let mut reply = [0; 5];
+                stream.read_exact(&mut reply)?;
+                if &reply != b"+OK\r\n" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "primary authentication failed",
+                    ));
+                }
+                stream.set_read_timeout(None)?;
+                stream.set_write_timeout(None)?;
+            }
             stream.write_all(b"*1\r\n$8\r\nREPLSYNC\r\n")?;
             loop {
                 let mut length = [0; 8];
@@ -956,6 +974,12 @@ fn xread_ids(
 }
 
 fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
+    if command[0].eq_ignore_ascii_case(b"ACL") {
+        return auth::acl(command);
+    }
+    if command[0].eq_ignore_ascii_case(b"BGREWRITEAOF") {
+        return aof::bgrewrite(command, store);
+    }
     store.eviction.touch(command, store);
     if command[0].eq_ignore_ascii_case(b"INFO") {
         eviction::info(command, store)
@@ -1560,13 +1584,18 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
 fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     let name = &command[0];
     let arity = command.len();
-    let valid = if let Some(valid) = eviction::valid_arity(command) {
+    let valid = if let Some(valid) = auth::valid_arity(command) {
+        valid
+    } else if let Some(valid) = eviction::valid_arity(command) {
         valid
     } else if let Some(valid) = pubsub::valid_arity(command) {
         valid
     } else if let Some(valid) = cache::valid_arity(command) {
         valid
-    } else if name.eq_ignore_ascii_case(b"SAVE") || name.eq_ignore_ascii_case(b"BGSAVE") {
+    } else if name.eq_ignore_ascii_case(b"SAVE")
+        || name.eq_ignore_ascii_case(b"BGSAVE")
+        || name.eq_ignore_ascii_case(b"BGREWRITEAOF")
+    {
         return Err(protocol::error("Command not allowed inside a transaction"));
     } else if let Some(valid) = rdb::valid_arity(command) {
         valid
@@ -1651,8 +1680,16 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
         .connect(Arc::new(Mutex::new(stream.try_clone()?)));
     let mut transaction: Option<Vec<Vec<Vec<u8>>>> = None;
     let mut transaction_error = false;
+    let mut authenticated = !store.auth.required();
     let mut watches = ClientWatches::new(Arc::clone(&store));
     while let Some(command) = protocol::read_command(&mut reader)? {
+        if !authenticated
+            && !command[0].eq_ignore_ascii_case(b"AUTH")
+            && !command[0].eq_ignore_ascii_case(b"QUIT")
+        {
+            subscription.write(b"-NOAUTH Authentication required.\r\n")?;
+            continue;
+        }
         if command[0].eq_ignore_ascii_case(b"REPLSYNC") && !store.read_only {
             if command.len() != 1 {
                 stream.write_all(&protocol::error(
@@ -1704,7 +1741,9 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
             }
             continue;
         }
-        let response = if store.read_only && is_mutating(&command) {
+        let response = if command[0].eq_ignore_ascii_case(b"AUTH") && transaction.is_none() {
+            store.auth.authenticate(&command, &mut authenticated)
+        } else if store.read_only && is_mutating(&command) {
             if transaction.is_some() {
                 transaction_error = true;
             }
@@ -1764,7 +1803,11 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         let mut response = format!("*{}\r\n", queued.len()).into_bytes();
                         let writes = queued.iter().any(|command| is_mutating(command));
                         for queued_command in queued {
-                            let result = execute_checked(&queued_command, &store, false);
+                            let result = if queued_command[0].eq_ignore_ascii_case(b"AUTH") {
+                                store.auth.authenticate(&queued_command, &mut authenticated)
+                            } else {
+                                execute_checked(&queued_command, &store, false)
+                            };
                             response.extend(result);
                         }
                         if writes {
@@ -1819,7 +1862,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    const USAGE: &str = "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--dir DIR] [--dbfilename FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY] [--maxclients COUNT]";
+    const USAGE: &str = "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--dir DIR] [--dbfilename FILE] [--replicaof HOST PORT] [--requirepass PASSWORD | --requirepass-file FILE] [--masterauth PASSWORD | --masterauth-file FILE] [--maxmemory SIZE] [--maxmemory-policy POLICY] [--maxclients COUNT]";
     if args.len() == 2 && matches!(args[1].as_str(), "--version" | "-V") {
         println!("ReRu {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -1834,6 +1877,8 @@ fn main() -> io::Result<()> {
     let mut rdb_dir = None;
     let mut rdb_filename = None;
     let mut replica_of = None;
+    let mut requirepass = None;
+    let mut masterauth = None;
     let mut maxmemory = 0;
     let mut maxclients = clients::DEFAULT_MAX_CLIENTS;
     let mut maxmemory_policy = eviction::Policy::NoEviction;
@@ -1843,6 +1888,14 @@ fn main() -> io::Result<()> {
             .get(index + 1)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, USAGE))?;
         match args[index].as_str() {
+            "--requirepass" => requirepass = Some(value.as_bytes().to_vec()),
+            "--masterauth" => masterauth = Some(value.as_bytes().to_vec()),
+            "--requirepass-file" => {
+                requirepass = Some(auth::read_password_file(std::path::Path::new(value))?)
+            }
+            "--masterauth-file" => {
+                masterauth = Some(auth::read_password_file(std::path::Path::new(value))?)
+            }
             "--port" => {
                 port = value.parse::<u16>().map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "--port must be a valid port")
@@ -1910,6 +1963,12 @@ fn main() -> io::Result<()> {
     } else {
         None
     };
+    if masterauth.is_some() && replica_of.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--masterauth requires --replicaof",
+        ));
+    }
     if rdb_path.is_some() && (snapshot_path.is_some() || aof_path.is_some()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1946,6 +2005,8 @@ fn main() -> io::Result<()> {
         eviction: eviction::Eviction::new(maxmemory, maxmemory_policy),
         expiry: expiry::Expiry::default(),
         clients: Arc::new(clients::Limits::new(maxclients)),
+        aof_rewrite: aof::Rewrite::default(),
+        auth: auth::Settings::new(requirepass),
         pubsub: pubsub::Hub::default(),
     });
     if let Some(path) = &store.aof_path {
@@ -1958,7 +2019,13 @@ fn main() -> io::Result<()> {
     expiry::start(&store)?;
     if let Some(address) = replica_of {
         let replica_store = Arc::clone(&store);
-        std::thread::spawn(move || follow_primary(address, replica_store));
+        std::thread::spawn(move || {
+            follow_primary(
+                address,
+                replica_store,
+                masterauth.filter(|password| !password.is_empty()),
+            )
+        });
     }
     eprintln!("ReRu listening on 127.0.0.1:{port}");
     for stream in listener.incoming() {
