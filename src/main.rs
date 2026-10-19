@@ -1,8 +1,10 @@
 mod aof;
 mod bitmaps;
 mod cache;
+mod clients;
 mod collections;
 mod eviction;
+mod expiry;
 mod geo;
 mod keyspace;
 mod list_ops;
@@ -51,6 +53,8 @@ struct SharedStore {
     pending_keys: Mutex<HashSet<Vec<u8>>>,
     staged_keys: Mutex<Option<HashSet<Vec<u8>>>>,
     eviction: eviction::Eviction,
+    expiry: expiry::Expiry,
+    clients: Arc<clients::Limits>,
     pubsub: pubsub::Hub,
 }
 
@@ -316,6 +320,11 @@ fn save_and_publish(store: &Store) -> io::Result<()> {
     let changed_keys: Vec<_> = store.pending_keys.lock().unwrap().drain().collect();
     if changed_keys.is_empty() {
         return Ok(());
+    }
+    if !store.read_only {
+        store
+            .expiry
+            .update(&store.entries.lock().unwrap(), &changed_keys);
     }
     if store.snapshot_path.is_none()
         && store.aof_path.is_none()
@@ -1810,6 +1819,15 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    const USAGE: &str = "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--dir DIR] [--dbfilename FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY] [--maxclients COUNT]";
+    if args.len() == 2 && matches!(args[1].as_str(), "--version" | "-V") {
+        println!("ReRu {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
+        println!("ReRu {}\n{USAGE}\nExperimental Redis-compatible server. See docs/COMPATIBILITY.md for supported behavior.", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let mut port = 6379;
     let mut snapshot_path = None;
     let mut aof_path = None;
@@ -1817,15 +1835,13 @@ fn main() -> io::Result<()> {
     let mut rdb_filename = None;
     let mut replica_of = None;
     let mut maxmemory = 0;
+    let mut maxclients = clients::DEFAULT_MAX_CLIENTS;
     let mut maxmemory_policy = eviction::Policy::NoEviction;
     let mut index = 1;
     while index < args.len() {
-        let value = args.get(index + 1).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--dir DIR] [--dbfilename FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
-            )
-        })?;
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, USAGE))?;
         match args[index].as_str() {
             "--port" => {
                 port = value.parse::<u16>().map_err(|_| {
@@ -1833,12 +1849,27 @@ fn main() -> io::Result<()> {
                 })?
             }
             "--snapshot" => snapshot_path = Some(PathBuf::from(value)),
+            "--maxclients" => {
+                maxclients = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--maxclients must be a positive integer",
+                        )
+                    })?;
+            }
             "--appendonly" => aof_path = Some(PathBuf::from(value)),
             "--dir" => rdb_dir = Some(PathBuf::from(value)),
             "--dbfilename" => {
                 let path = PathBuf::from(value);
                 if path.components().count() != 1 || path.file_name().is_none() {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "--dbfilename must be a filename"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--dbfilename must be a filename",
+                    ));
                 }
                 rdb_filename = Some(path);
             }
@@ -1865,12 +1896,7 @@ fn main() -> io::Result<()> {
                 replica_of = Some(format!("{value}:{upstream_port}"));
                 index += 1;
             }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--dir DIR] [--dbfilename FILE] [--replicaof HOST PORT] [--maxmemory SIZE] [--maxmemory-policy POLICY]",
-                ))
-            }
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
         }
         index += 2;
     }
@@ -1918,6 +1944,8 @@ fn main() -> io::Result<()> {
         pending_keys: Mutex::new(HashSet::new()),
         staged_keys: Mutex::new(None),
         eviction: eviction::Eviction::new(maxmemory, maxmemory_policy),
+        expiry: expiry::Expiry::default(),
+        clients: Arc::new(clients::Limits::new(maxclients)),
         pubsub: pubsub::Hub::default(),
     });
     if let Some(path) = &store.aof_path {
@@ -1927,19 +1955,31 @@ fn main() -> io::Result<()> {
         store.eviction.evict(&store);
         save_and_publish(&store)?;
     }
+    expiry::start(&store)?;
     if let Some(address) = replica_of {
         let replica_store = Arc::clone(&store);
         std::thread::spawn(move || follow_primary(address, replica_store));
     }
     eprintln!("ReRu listening on 127.0.0.1:{port}");
     for stream in listener.incoming() {
-        let stream = stream?;
+        let mut stream = stream?;
+        let Some(permit) = store.clients.acquire() else {
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+            let _ = stream.write_all(b"-ERR max number of clients reached\r\n");
+            continue;
+        };
         let store = Arc::clone(&store);
-        std::thread::spawn(move || {
-            if let Err(error) = handle_client(stream, store) {
-                eprintln!("client error: {error}");
-            }
-        });
+        if let Err(error) = std::thread::Builder::new()
+            .name("client".into())
+            .spawn(move || {
+                let _permit = permit;
+                if let Err(error) = handle_client(stream, store) {
+                    eprintln!("client error: {error}");
+                }
+            })
+        {
+            eprintln!("could not start client thread: {error}");
+        }
     }
     Ok(())
 }

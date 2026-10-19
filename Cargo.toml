@@ -1,6 +1,9 @@
 [package]
 name = "reru"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
+description = "An experimental Redis-compatible cache and data structure server written in Rust"
+repository = "https://github.com/mansiverma897993/ReRu"
+readme = "README.md"
 
 [dependencies]

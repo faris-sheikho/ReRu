@@ -9,7 +9,10 @@ partial INFO memory/stats, keyspace and collection scans, and expiry inspection 
 ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
 local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
-The latest increment adds an initial Redis RDB codec, SAVE/BGSAVE/LASTSAVE,
+The latest increment adds deadline-indexed background expiry, deletion propagation
+and persistence, configurable client limits, and client/expiry INFO metrics.
+Version 0.1.0-alpha.1 is an experimental release candidate, not production readiness.
+The preceding increment added an initial Redis RDB codec, SAVE/BGSAVE/LASTSAVE,
 DUMP/RESTORE, and full-file interoperability checks. It supports common
 collection encodings, checksums and key expiry; unsupported types fail explicitly.
 The preceding increment added sorted-set multi-key and blocking pops plus initial
@@ -67,8 +70,8 @@ not been selected.
   Custom replication frames carry changed-key metadata for replica `WATCH`;
   a full resynchronization invalidates every active watch on that replica.
 - Only RESP array requests and RESP2 replies are supported.
-- Each client uses one operating-system thread. There is no configured client
-  limit. The optional maxmemory ceiling uses estimated logical dataset size,
+- Each client uses one operating-system thread, bounded by `--maxclients`
+  (default 10000). The optional maxmemory ceiling uses estimated logical dataset size,
   not process memory. Bitmap values have a 64 MiB growth cap.
 - Ten maxmemory policies are available. ReRu's memory accounting, LRU/LFU
   algorithms, INFO output, and most CONFIG parameters are not Redis exact.

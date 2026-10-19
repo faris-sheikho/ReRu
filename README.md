@@ -1,7 +1,8 @@
 # ReRu
 
-A Redis-compatible server written in Rust. **Work in progress:** ReRu is not a
-complete Redis replacement.
+A Redis-compatible cache and data structure server written in Rust.
+**0.1.0-alpha.1 is experimental**; ReRu is not a complete Redis replacement.
+See the [release notes](docs/RELEASE_NOTES.md) for scope and verification.
 
 ## Run
 
@@ -13,6 +14,7 @@ cargo run -- --port 6380 --appendonly ./reru.aof
 cargo run -- --port 6380 --dir . --dbfilename dump.rdb
 cargo run -- --port 6381 --replicaof 127.0.0.1 6380
 cargo run -- --maxmemory 64mb --maxmemory-policy allkeys-lru
+cargo run -- --maxclients 256
 ```
 
 The server listens on `127.0.0.1:6379`; use `--port PORT` to change the port.
@@ -31,7 +33,10 @@ the custom snapshot and AOF modes.
 (default), `allkeys-lru`, `allkeys-lrm`, `allkeys-lfu`, `allkeys-random`,
 `volatile-lru`, `volatile-lrm`, `volatile-lfu`, `volatile-random`, and
 `volatile-ttl`; the default limit is `0` (unlimited).
-`CONFIG GET/SET` can inspect and change these two settings at runtime.
+`CONFIG GET/SET` can inspect and change these memory settings and `maxclients`
+at runtime. `--maxclients` defaults to 10000; excess connections receive an error.
+Idle expired keys are reclaimed by a background worker on primaries, with
+deletions recorded in the configured AOF/snapshot and sent to ReRu replicas.
 `INFO memory` and `INFO stats` report the estimated dataset size and eviction
 count. These memory figures are not the process's actual RAM use.
 
@@ -59,7 +64,8 @@ count. These memory figures are not the process's actual RAM use.
 - Geospatial storage and queries: `GEOADD`, `GEOPOS`, `GEOHASH`, `GEODIST`,
   `GEOSEARCH`, and `GEOSEARCHSTORE`
 - Optional memory limit with OOM rejection and ten maxmemory policies
-- `CONFIG GET/SET` for `maxmemory` and `maxmemory-policy`
+- `CONFIG GET/SET` for `maxmemory`, `maxmemory-policy`, and `maxclients`
+- Background key expiry, bounded expiry batches, connection limits, and `INFO clients`
 - `DEL`, `EXISTS`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, and `PERSIST`
 - `FLUSHDB` and `FLUSHALL` clear ReRu's single database
 - `COPY`, `RENAME`, `RENAMENX`, `UNLINK`, `TOUCH`, and `DBSIZE`

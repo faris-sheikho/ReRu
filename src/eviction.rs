@@ -138,11 +138,18 @@ pub fn info(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
     let mut report = String::new();
     if memory {
         let settings = store.eviction.settings();
-        let used = dataset_bytes(&store.entries.lock().unwrap());
+        let entries = store.entries.lock().unwrap();
+        let used = dataset_bytes(&entries);
+        let retained_keys = entries.len();
+        drop(entries);
         report.push_str(&format!(
             "# Memory\r\nused_memory:{used}\r\nmaxmemory:{}\r\nmaxmemory_policy:{}\r\nreru_estimated_dataset_bytes:{used}\r\n\r\n",
             settings.maxmemory,
             settings.policy.name()
+        ));
+        report.push_str(&format!(
+            "reru_retained_keys:{retained_keys}\r\nreru_expiry_index_keys:{}\r\n\r\n",
+            store.expiry.indexed_keys()
         ));
     }
     if stats {
@@ -150,6 +157,14 @@ pub fn info(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
             "# Stats\r\nevicted_keys:{}\r\n\r\n",
             store.eviction.evicted_keys.load(Ordering::Relaxed)
         ));
+        report.push_str(&format!(
+            "reru_active_expired_keys:{}\r\n\r\n",
+            store.expiry.active_expired_keys()
+        ));
+        report.push_str(&store.clients.stats());
+    }
+    if section.is_none_or(|name| name.eq_ignore_ascii_case(b"clients")) {
+        report.push_str(&store.clients.info());
     }
     if section.is_none_or(|name| name.eq_ignore_ascii_case(b"persistence")) {
         report.push_str(&crate::rdb::info(store));
@@ -166,6 +181,10 @@ pub fn execute_config(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
         let mut output = Vec::new();
         for (name, value) in [
             (b"maxmemory".as_slice(), settings.maxmemory.to_string()),
+            (
+                b"maxclients".as_slice(),
+                store.clients.maximum().to_string(),
+            ),
             (
                 b"maxmemory-policy".as_slice(),
                 settings.policy.name().to_string(),
@@ -204,6 +223,7 @@ pub fn execute_config(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
         return protocol::array(&output);
     }
     let mut updated = settings;
+    let mut maxclients = store.clients.maximum();
     for pair in command[2..].as_chunks::<2>().0 {
         let value = match std::str::from_utf8(&pair[1]) {
             Ok(value) => value,
@@ -219,11 +239,17 @@ pub fn execute_config(command: &[Vec<u8>], store: &Store) -> Vec<u8> {
                 Some(value) => value,
                 None => return protocol::error("Invalid maxmemory-policy value"),
             };
+        } else if pair[0].eq_ignore_ascii_case(b"maxclients") {
+            maxclients = match value.parse::<usize>().ok().filter(|n| *n > 0) {
+                Some(value) => value,
+                None => return protocol::error("Invalid maxclients value"),
+            };
         } else {
             return protocol::error("Unsupported CONFIG parameter");
         }
     }
     store.eviction.update(updated, store);
+    store.clients.set_maximum(maxclients);
     b"+OK\r\n".to_vec()
 }
 

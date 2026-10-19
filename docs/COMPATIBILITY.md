@@ -1,6 +1,6 @@
 # ReRu compatibility status
 
-Updated: 18 October 2026. This inventory describes the implementation and local
+Updated: 19 October 2026. This inventory describes the implementation and local
 tests; it does not certify complete compatibility with Redis.
 
 ## Implemented commands
@@ -20,8 +20,8 @@ tests; it does not certify complete compatibility with Redis.
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB` | Binary channels/messages, glob patterns, RESP2 subscribed mode, CHANNELS/NUMSUB/NUMPAT; local process only |
 | Connection close | `QUIT` | Replies OK and closes the connection |
-| Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory` and `maxmemory-policy`; GET also reports configured RDB dir/dbfilename |
-| Observability | `INFO` | Partial `memory`, `stats`, and `persistence` sections |
+| Configuration | `CONFIG GET`, `CONFIG SET` | Runtime `maxmemory`, `maxmemory-policy`, and `maxclients`; GET also reports configured RDB dir/dbfilename |
+| Observability | `INFO` | Partial `memory`, `stats`, `clients`, and `persistence` sections |
 | Server time | `TIME` | Epoch seconds and microseconds as RESP2 bulk strings |
 | Persistence | `SAVE`, `BGSAVE`, `LASTSAVE`, `DUMP`, `RESTORE` | Initial Redis RDB interoperability; supported values, key expiry, checksums, REPLACE/ABSTTL |
 
@@ -91,17 +91,43 @@ algorithm. Random policies pick from a shuffled candidate order, and
 bounded writes under noeviction and volatile policies copy it for rollback.
 These paths need further performance work. `INFO memory` reports the logical
 estimate as `used_memory` and `reru_estimated_dataset_bytes`; `INFO stats`
-reports `evicted_keys`. Other INFO fields and sections are not implemented.
-`CONFIG GET/SET` supports only the two memory settings; runtime changes are not
+reports `evicted_keys`. Additional supported fields are described below.
+`CONFIG GET/SET` supports the two memory settings and `maxclients`; runtime changes are not
 saved to a config file.
+
+### Background expiry and connection limits
+
+Primaries reclaim idle expired keys using a deadline index with one record per
+expiring key. A worker attempts a cycle every 100 ms, processing up to 256 keys
+or 5 ms of index/deletion work while holding the command gate. Persistence and
+replication serialization are outside this time budget and can take longer.
+Busy commands can delay expiry. TTL changes replace the previous index entry;
+PERSIST, replacement, deletion and eviction remove it. Startup rebuilds the index.
+Deletion invalidates WATCH and follows the normal AOF/snapshot/replication path.
+Replicas receive primary deletions and do not run an independent expiry worker.
+This differs from Redis's sampled active-expiry algorithm.
+
+`INFO memory` exposes `reru_retained_keys` (including expired entries not yet
+reclaimed) and `reru_expiry_index_keys`. `INFO stats` exposes
+`reru_active_expired_keys`, counting only keys physically removed by the worker.
+The index's memory overhead is not included in ReRu's logical maxmemory estimate.
+
+`--maxclients COUNT` defaults to 10000 and requires a positive integer. Accepted
+connections, including replication and subscriptions, hold a slot until their
+handler exits. Excess clients receive `ERR max number of clients reached`.
+Lowering `CONFIG SET maxclients` keeps existing connections and rejects new ones
+until capacity becomes available. `INFO clients` reports `connected_clients`
+and `maxclients`; `INFO stats` adds `total_connections_received` and
+`rejected_connections`. Thread creation failures are logged. These limits do not
+bound transaction queues, Pub/Sub buffers, aggregate request memory or RSS.
 
 `COPY` supports same-database copy and `REPLACE`; `DB` selection is pending.
 `FLUSHDB` and `FLUSHALL` both clear ReRu's only database. `ASYNC` is accepted
 but deletion is currently synchronous; flush invalidates WATCH and is persisted
 through ReRu snapshots/AOF.
 `UNLINK` removes keys immediately but frees memory synchronously, unlike
-Redis's background reclamation. `DBSIZE` counts unexpired keys without an
-active expiry sweep. `TOUCH` updates the in-memory access order and frequency.
+Redis's background reclamation. `DBSIZE` counts unexpired keys; the separate
+expiry worker reclaims idle keys. `TOUCH` updates the in-memory access order and frequency.
 `KEYS` and `SCAN` exclude expired keys. `SCAN` uses a sorted index offset as
 its cursor, applies `MATCH` and `TYPE` after selecting each page, and treats
 `COUNT` as a page-size hint. It rebuilds and sorts the live key list on every
@@ -195,7 +221,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **156 tests**: 13 unit tests and 143 server integration tests.
+The local suite has **164 tests**: 14 unit tests and 150 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,
@@ -203,6 +229,11 @@ list, stream, hash, set, and transaction regression tests remain. Eviction tests
 cover OOM rollback, WATCH, transactions, policy selection, INFO counters,
 access order, runtime configuration, and snapshot restart. Keyspace tests cover rename/copy TTL, noeviction rollback,
 WATCH, TOUCH/LRU, and blocking-list wakeup. Formatting and Clippy are checked.
+Cache lifecycle tests check idle reclamation across multiple batches, rescheduled
+and cancelled TTLs, OOM rollback, WATCH invalidation, restart index rebuilding,
+AOF/snapshot deletion and replica propagation. Client-limit tests check rejection,
+QUIT/disconnect/malformed-request cleanup, atomic configuration validation, and
+lowering/raising limits without dropping existing clients.
 
 The suite includes an optional deterministic RESP2 differential test covering
 representative strings, lists, hashes, sets, sorted sets, streams, and transactions.
