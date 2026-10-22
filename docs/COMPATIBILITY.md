@@ -1,6 +1,6 @@
 # ReRu compatibility status
 
-Updated: 19 October 2026. This inventory describes the implementation and local
+Updated: 22 October 2026. This inventory describes the implementation and local
 tests; it does not certify complete compatibility with Redis.
 
 ## Implemented commands
@@ -10,7 +10,7 @@ tests; it does not certify complete compatibility with Redis.
 | Connection | `PING`, `ECHO` | PING with an optional message; RESP2 requests/replies |
 | Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `INCRBY`, `INCRBYFLOAT`, `DECR`, `DECRBY`, `GETRANGE`, `SUBSTR`, `SETRANGE` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access, numeric arithmetic and byte ranges |
 | Lists | `RPUSH`, `LPUSH`, `LPUSHX`, `RPUSHX`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LREM`, `LPOS`, `LPOP`, `RPOP`, `RPOPLPUSH`, `LMOVE`, `BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, `LMPOP`, `BLMPOP` | Multiple elements, negative indexes, edits, moves, position search, single/multi-key blocking pops and moves with timeout |
-| Streams | `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, `XTRIM` | Entry IDs, forward/reverse ranges, deletion, exact MAXLEN/MINID trimming and blocking reads; no consumer groups |
+| Streams | `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, `XTRIM`, `XGROUP CREATE`, `XGROUP SETID`, `XGROUP DESTROY`, `XGROUP CREATECONSUMER`, `XGROUP DELCONSUMER`, `XREADGROUP`, `XACK`, `XPENDING`, `XCLAIM`, `XAUTOCLAIM`, `XINFO GROUPS`, `XINFO CONSUMERS`, `XINFO STREAM`, `XSETID` | IDs, ranges, deletion, exact trimming, blocking reads, consumer groups, pending entries, acknowledgement, claiming and diagnostics; XADD NOMKSTREAM/MAXLEN/MINID |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD`, `HSCAN` | Binary fields/values, multiple field updates, missing-field nil replies, increments, random fields and cursor iteration |
 | Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SINTERCARD`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `SSCAN` | Binary members, deduplication, membership, cardinality, random selection, atomic moves, set algebra and cursor iteration; SINTERCARD LIMIT |
 | Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANGEBYLEX`, `ZREVRANGEBYLEX`, `ZCOUNT`, `ZLEXCOUNT`, `ZREM`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYLEX`, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, `ZPOPMAX`, `ZMPOP`, `BZMPOP`, `BZPOPMIN`, `BZPOPMAX`, `ZUNION`, `ZUNIONSTORE`, `ZINTER`, `ZINTERSTORE`, `ZDIFF`, `ZDIFFSTORE`, `ZINTERCARD` | Score-ordered members, rank, score and lex ranges, ZADD NX/XX/GT/LT/CH/INCR, cursor iteration, range removal, ordered and multi-key blocking pops, weighted algebra and destination storing |
@@ -26,7 +26,7 @@ tests; it does not certify complete compatibility with Redis.
 | Server time | `TIME` | Epoch seconds and microseconds as RESP2 bulk strings |
 | Persistence | `SAVE`, `BGSAVE`, `LASTSAVE`, `DUMP`, `RESTORE`, `BGREWRITEAOF` | Initial Redis RDB interoperability; supported values, key expiry, checksums, REPLACE/ABSTTL; manual single-file AOF compaction |
 
-Total: **178 Redis command metadata entries**, or **38.8% name presence**
+Total: **192 Redis command metadata entries**, or **41.8% name presence**
 against 459 entries in the pinned Redis 8.10.2 metadata. This is neither a
 behavior pass rate nor a percentage of Redis completed. Run
 `powershell -File scripts/command_coverage.ps1 -RedisSource PATH_TO_REDIS_8_10_2`
@@ -155,9 +155,62 @@ the local Redis 7.0.15 comparison covers the other algebra options.
 
 `XDEL` and exact `XTRIM MAXLEN|MINID` retain a stream's last generated ID
 when entries disappear. The ID survives ReRu snapshots and AOF replay.
-Approximate trimming (`~`), `LIMIT`, consumer-group references, and other
-stream options remain unimplemented. New stream snapshots use a revised type
+Approximate trimming (`~`), `LIMIT`, reference-aware trimming options, and newer
+stream features remain unimplemented. New stream snapshots use a revised type
 tag; new builds read older tags, but older builds cannot read new snapshots.
+
+## Stream consumer groups
+
+`XGROUP CREATE/SETID` supports explicit IDs or `$`, optional `ENTRIESREAD`, and
+`MKSTREAM` for creation. CREATECONSUMER/DELCONSUMER manage consumers; deleting a
+consumer also removes its pending entries. DESTROY removes the group. Binary
+stream, group and consumer names are supported.
+
+`XREADGROUP GROUP group consumer` supports multiple streams, COUNT, BLOCK and
+NOACK. `>` distributes new entries; explicit IDs replay that consumer's pending
+entries. Deleted or trimmed payloads remain pending and replay as null payloads.
+`XACK` removes pending references. `XPENDING` supports summary and range forms,
+IDLE, exclusive bounds and a consumer filter. `XCLAIM` supports IDLE, TIME,
+RETRYCOUNT, FORCE, JUSTID and LASTID. `XAUTOCLAIM` implements bounded scanning,
+COUNT, JUSTID and the Redis 7 deleted-ID reply. These provide at-least-once
+processing primitives, not exactly-once application execution.
+
+`XINFO GROUPS/CONSUMERS/STREAM` exposes group cursors, pending counts, consumers,
+entry counters and stream endpoints. STREAM FULL accepts COUNT (zero means all)
+and returns entries plus group/consumer pending lists with delivery timestamps.
+ReRu uses a vector for streams: both radix-tree allocation metrics report zero.
+Consumer diagnostics include the Redis 7.2+ inactive/active-time fields. Newer
+Redis IDMP and negative-acknowledgement diagnostics are not implemented. Lag is
+inferred from counters and retained entries and can be unknown after deletion
+or cursor changes; complete parity for every history still needs validation.
+
+`XADD` supports NOMKSTREAM and exact MAXLEN/MINID trimming, with optional `=`.
+Appending and trimming are atomic, preserve TTL, and retain pending references.
+`XSETID` supports ENTRIESADDED and MAXDELETEDID. Like the pinned Redis 8.10.2
+source, it rejects an ID below the existing maximum deleted entry ID; Redis
+7.0.15 permits that reset, so this case has a separate target-version test.
+Trimming does not advance the maximum explicitly deleted ID.
+
+Group writes participate in transactions, WATCH, memory limits, snapshots, AOF
+and ReRu replication. BLOCK is ignored inside EXEC. Competing consumers receive
+distinct new entries, but FIFO waiter order and disconnect cancellation remain
+pending. Group delivery is a mutation and is rejected on read-only replicas.
+New stream snapshot metadata preserves groups, ownership, retry counts and
+consumer/delivery timestamps. Old snapshots load without groups and approximate
+entries-added with the retained entry count. New snapshots require matching
+builds; old binaries cannot read the new stream type tag.
+
+AOF rebuild recreates groups and pending entries using Redis commands, including
+trimmed or deleted payloads and explicitly reset stream IDs. Delivery timestamps
+and retry counts survive; consumer seen/active timestamps are recreated during
+replay, so idle diagnostics can reset. RDB streams are still unsupported.
+
+Remaining stream work includes reference-aware trimming, XACKDEL/XDELEX/XNACK,
+XREADGROUP CLAIM, IDMP, additional options and stream RDB encodings.
+
+Behavior references: [XREADGROUP](https://redis.io/docs/latest/commands/xreadgroup/),
+[XINFO STREAM](https://redis.io/docs/latest/commands/xinfo-stream/),
+[XSETID](https://redis.io/docs/latest/commands/xsetid/).
 
 ## Persistence and replication
 
@@ -222,7 +275,8 @@ error even though replacement has occurred. Windows power-loss durability needs
 further validation.
 
 The worker preserves supported types, absolute expiry and stream last-generated
-IDs. Only one rewrite can run at a time. It is rejected inside MULTI and when
+IDs, consumer groups, pending ownership and delivery counts. Only one rewrite
+can run at a time. It is rejected inside MULTI and when
 AOF is disabled. ReRu does not implement Redis's RDB/rewrite scheduling or
 multipart manifest protocol. Dataset cloning temporarily increases memory usage;
 the initial clone and final tail copy/fsync block commands. Large workloads still
@@ -279,7 +333,7 @@ notifications, and Pub/Sub ACLs remain pending.
 
 ## Verification for this increment
 
-The local suite has **175 tests**: 16 unit tests and 159 server integration tests.
+The local suite has **189 tests**: 18 unit tests and 171 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,
@@ -301,6 +355,12 @@ state, failed reauthentication, transactions, subscriptions, binary password fil
 restart, credential exclusion from AOF, and protected primary/replica connections.
 The differential suite also checks nopass AUTH and ACL WHOAMI against Redis.
 
+Consumer-group tests cover delivery ownership, NOACK, history, tombstones,
+acknowledgements, claiming, blocking/timeouts, concurrent consumers, diagnostics,
+TTL, WATCH, OOM rollback, restart/rewrite and replica updates. An additional
+reference-dependent test compares group command sequences and XADD options
+against Redis 7.0.15; it skips comparisons if the reference port is unset.
+
 The suite includes an optional deterministic RESP2 differential test covering
 representative strings, lists, hashes, sets, sorted sets, streams, and transactions.
 It passed against a local Redis 7.0.15 instance with
@@ -320,7 +380,7 @@ Run instructions are in [the development workflow](REA_WORKFLOW.md).
 
 ## Remaining major work
 
-Additional sorted-set and bitmap commands, geo indexing, stream consumer groups,
+Additional sorted-set and bitmap commands, geo indexing, newer stream features,
 sharded Pub/Sub, scripting, broader command options, full Redis RDB/AOF, PSYNC,
 multi-user ACLs, TLS, RESP3, cluster/failover, Redis-exact eviction internals, bounded resource usage and performance engineering
 remain. Blocking clients do not yet receive Redis's FIFO waiter guarantees.

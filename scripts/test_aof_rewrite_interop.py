@@ -34,7 +34,17 @@ def main():
                 processes.append((process, reru, False))
                 seed(reru)
                 reru.call("XADD", "stream", "5-0", "f", "v")
+                reru.call("XGROUP", "CREATE", "stream", "workers", "0")
+                reru.call("XREADGROUP", "GROUP", "workers", "alice", "STREAMS", "stream", ">")
                 reru.call("XDEL", "stream", "5-0")
+                reru.call("XGROUP", "CREATE", "empty-stream", "temporary", "0", "MKSTREAM")
+                reru.call("XGROUP", "DESTROY", "empty-stream", "temporary")
+                reru.call("XADD", "trimmed-stream", "9-0", "f", "v")
+                reru.call("XGROUP", "CREATE", "trimmed-stream", "g", "0")
+                reru.call("XREADGROUP", "GROUP", "g", "alice", "STREAMS", "trimmed-stream", ">")
+                reru.call("XTRIM", "trimmed-stream", "MAXLEN", "0")
+                reru.call("XSETID", "trimmed-stream", "0-0")
+                reru.call("XADD", "trimmed-stream", "0-1", "f", "new")
                 for _ in range(30):
                     reru.call("SET", "history", b"x" * 16384)
                 reru.call("DEL", "history")
@@ -57,8 +67,20 @@ def main():
                 assert redis.call("GET", "counter") == b"20"
                 assert redis.call("GET", "history") is None
                 assert redis.call("XLEN", "stream") == 0
-                assert redis.call("XADD", "stream", "5-*", "f", "v") == b"5-1"
-                print("PASS: rewritten ReRu AOF -> redis-check-aof -> Redis; collections, binary data, TTL, stream IDs and subsequent writes")
+                assert redis.call("XPENDING", "stream", "workers") == reru.call("XPENDING", "stream", "workers")
+                assert redis.call("XREADGROUP", "GROUP", "workers", "alice", "STREAMS", "stream", "0") == reru.call("XREADGROUP", "GROUP", "workers", "alice", "STREAMS", "stream", "0")
+                assert redis.call("XADD", "empty-stream", "0-1", "f", "v") == reru.call("XADD", "empty-stream", "0-1", "f", "v") == b"0-1"
+                assert redis.call("XADD", "stream", "5-*", "f", "v") == reru.call("XADD", "stream", "5-*", "f", "v") == b"5-1"
+                for command in [("XPENDING", "trimmed-stream", "g"), ("XRANGE", "trimmed-stream", "-", "+")]:
+                    assert redis.call(*command) == reru.call(*command)
+                for key in ["stream", "trimmed-stream", "empty-stream"]:
+                    ours = reru.call("XINFO", "STREAM", key)
+                    reference = redis.call("XINFO", "STREAM", key)
+                    ours = dict(zip(ours[::2], ours[1::2]))
+                    reference = dict(zip(reference[::2], reference[1::2]))
+                    for field in [b"entries-added", b"max-deleted-entry-id", b"last-generated-id", b"length", b"groups"]:
+                        assert ours[field] == reference[field], (key, field, ours, reference)
+                print("PASS: rewritten ReRu AOF -> redis-check-aof -> Redis; collections, TTL, stream IDs, groups, deleted pending entries and subsequent writes")
         finally:
             for process, client, is_redis in reversed(processes):
                 if is_redis and process.poll() is None:

@@ -49,6 +49,8 @@ class Client:
             assert self.file.read(2) == b"\r\n"
             return data
         if kind == b"*":
+            if int(value) == -1:
+                return None
             return [self.read() for _ in range(int(value))]
         raise AssertionError(f"unknown response: {line!r}")
 

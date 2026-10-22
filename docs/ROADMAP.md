@@ -9,7 +9,9 @@ partial INFO memory/stats, keyspace and collection scans, and expiry inspection 
 ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
 local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
-The latest increment adds manual BGREWRITEAOF compaction with concurrent-write
+The latest increment adds stream consumer groups, pending-message recovery,
+XINFO diagnostics, atomic XADD trimming and group persistence/replication.
+The preceding increment added manual BGREWRITEAOF compaction with concurrent-write
 preservation, AOF status/configuration inspection, and recovery tests. It also
 adds default-user AUTH, ACL WHOAMI, password-file startup configuration and
 authenticated connections from replicas to their primary.
@@ -40,16 +42,18 @@ not been selected.
 - Compare observable behavior against a real Redis server and keep regression
   tests for every command before marking it complete.
 - Track command-name presence separately from verified behavior and subsystem
-  coverage. The current 178/459 metadata entries (38.8%) do not establish
+  coverage. The current 192/459 metadata entries (41.8%) do not establish
   30–40% implementation of Redis.
 - Keep the server usable after every small, tested commit.
 
 ## Work remaining
 
-1. Complete lists and streams, including blocking operations and stream IDs.
+1. Complete remaining list options and newer stream features: reference-aware
+   trimming/deletion, IDMP, negative acknowledgements and CLAIM reads. Add FIFO
+   waiter ordering and disconnect cancellation for blocking commands.
 2. Expand sorted sets, bitmaps, and geospatial indexing; extend hashes and
-   sets with scans, field expiry, random access, moves, and storing set algebra
-   results.
+   sets with field expiry and remaining command options. Existing scans, random
+   access, moves and set algebra still need broader compatibility tests.
 3. Expand transaction compatibility testing, Pub/Sub coverage, scripting, and
    the remaining keyspace commands.
 4. Expand RDB to streams, legacy encodings and modern Redis types; add save

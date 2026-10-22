@@ -540,17 +540,20 @@ fn entry_bytes(key: &[u8], entry: &Entry) -> usize {
     let content = match &entry.value {
         Value::String(bytes) => bytes.len(),
         Value::List(items) => items.iter().map(|item| item.len() + 16).sum(),
-        Value::Stream(stream) => stream
-            .entries
-            .iter()
-            .map(|item| {
-                16 + item
-                    .fields
-                    .iter()
-                    .map(|field| field.len() + 16)
-                    .sum::<usize>()
-            })
-            .sum(),
+        Value::Stream(stream) => {
+            stream
+                .entries
+                .iter()
+                .map(|item| {
+                    16 + item
+                        .fields
+                        .iter()
+                        .map(|field| field.len() + 16)
+                        .sum::<usize>()
+                })
+                .sum::<usize>()
+                + crate::stream_groups::metadata_bytes(stream)
+        }
         Value::Hash(fields) => fields
             .iter()
             .map(|(field, value)| field.len() + value.len() + 32)

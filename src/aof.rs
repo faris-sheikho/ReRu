@@ -223,22 +223,7 @@ fn append_value(output: &mut Vec<u8>, key: &[u8], entry: &Entry) -> io::Result<(
             }
         }
         Value::Stream(stream) => {
-            for item in &stream.entries {
-                let id = item.id.to_string();
-                let mut args: Vec<&[u8]> = vec![b"XADD", key, id.as_bytes()];
-                args.extend(item.fields.iter().map(Vec::as_slice));
-                command(output, &args);
-            }
-            if stream.last_generated_id
-                > stream
-                    .entries
-                    .last()
-                    .map_or(crate::streams::StreamId::default(), |item| item.id)
-            {
-                let id = stream.last_generated_id.to_string();
-                command(output, &[b"XADD", key, id.as_bytes(), b"__reru_aof__", b""]);
-                command(output, &[b"XDEL", key, id.as_bytes()]);
-            }
+            append_stream(output, key, stream);
         }
     }
     if let Some(deadline) = entry.expires_at {
@@ -255,6 +240,108 @@ fn append_value(output: &mut Vec<u8>, key: &[u8], entry: &Entry) -> io::Result<(
         command(output, &[b"PEXPIREAT", key, time.as_bytes()]);
     }
     Ok(())
+}
+
+fn append_stream(output: &mut Vec<u8>, key: &[u8], stream: &crate::streams::Stream) {
+    use std::collections::BTreeSet;
+    // Create an empty stream even when it has no live entries or groups.
+    command(
+        output,
+        &[
+            b"XGROUP",
+            b"CREATE",
+            key,
+            b"__reru_aof_empty__",
+            b"0",
+            b"MKSTREAM",
+        ],
+    );
+    command(output, &[b"XGROUP", b"DESTROY", key, b"__reru_aof_empty__"]);
+    // Restore PEL entries on temporary payloads. Trimming these (rather than
+    // XDEL) preserves max-deleted-entry-id, including its zero sentinel. A
+    // trimmed pending ID may exceed last-generated-id after an explicit reset.
+    let pending_ids: BTreeSet<_> = stream
+        .groups
+        .values()
+        .flat_map(|group| group.pending.keys().copied())
+        .collect();
+    for id in &pending_ids {
+        command(
+            output,
+            &[
+                b"XADD",
+                key,
+                id.to_string().as_bytes(),
+                b"__reru_aof_pending__",
+                b"",
+            ],
+        );
+    }
+    for (name, group) in &stream.groups {
+        let last = group.last_delivered.to_string();
+        let read = group
+            .entries_read
+            .map_or_else(|| "-1".to_owned(), |n| n.to_string());
+        command(
+            output,
+            &[
+                b"XGROUP",
+                b"CREATE",
+                key,
+                name,
+                last.as_bytes(),
+                b"ENTRIESREAD",
+                read.as_bytes(),
+            ],
+        );
+        for consumer in group.consumers.keys() {
+            command(output, &[b"XGROUP", b"CREATECONSUMER", key, name, consumer]);
+        }
+        for (id, pending) in &group.pending {
+            let id = id.to_string();
+            let at = pending.delivered_at.to_string();
+            let deliveries = pending.deliveries.to_string();
+            command(
+                output,
+                &[
+                    b"XCLAIM",
+                    key,
+                    name,
+                    &pending.consumer,
+                    b"0",
+                    id.as_bytes(),
+                    b"TIME",
+                    at.as_bytes(),
+                    b"RETRYCOUNT",
+                    deliveries.as_bytes(),
+                    b"FORCE",
+                    b"JUSTID",
+                ],
+            );
+        }
+    }
+    if !pending_ids.is_empty() {
+        command(output, &[b"XTRIM", key, b"MAXLEN", b"0"]);
+        command(output, &[b"XSETID", key, b"0-0"]);
+    }
+    for item in &stream.entries {
+        let id = item.id.to_string();
+        let mut args: Vec<&[u8]> = vec![b"XADD", key, id.as_bytes()];
+        args.extend(item.fields.iter().map(Vec::as_slice));
+        command(output, &args);
+    }
+    command(
+        output,
+        &[
+            b"XSETID",
+            key,
+            stream.last_generated_id.to_string().as_bytes(),
+            b"ENTRIESADDED",
+            stream.entries_added.to_string().as_bytes(),
+            b"MAXDELETEDID",
+            stream.max_deleted_id.to_string().as_bytes(),
+        ],
+    );
 }
 
 pub fn append(

@@ -15,6 +15,7 @@ mod pubsub;
 mod rdb;
 mod replication;
 mod sorted_sets;
+mod stream_groups;
 mod streams;
 
 use std::collections::{HashMap, HashSet};
@@ -175,6 +176,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
         || bitmaps::is_mutating(command)
         || sorted_sets::is_mutating(command)
         || collections::is_mutating(command)
+        || stream_groups::is_mutating(command)
         || [
             b"SET".as_slice(),
             b"INCR",
@@ -215,6 +217,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
 fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
     // Collection handlers record real changes themselves, including no-op checks.
     if cache::valid_arity(command).is_some()
+        || stream_groups::valid_arity(command).is_some()
         || rdb::valid_arity(command).is_some()
         || geo::valid_arity(command).is_some()
         || list_ops::valid_arity(command).is_some()
@@ -239,6 +242,7 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
         || command[0].eq_ignore_ascii_case(b"BZMPOP")
         || command[0].eq_ignore_ascii_case(b"BZPOPMIN")
         || command[0].eq_ignore_ascii_case(b"BZPOPMAX")
+        || command[0].eq_ignore_ascii_case(b"XADD")
         || command[0].eq_ignore_ascii_case(b"XDEL")
         || command[0].eq_ignore_ascii_case(b"XTRIM")
         || command[0].eq_ignore_ascii_case(b"FLUSHDB")
@@ -974,6 +978,9 @@ fn xread_ids(
 }
 
 fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> Vec<u8> {
+    if let Some(response) = stream_groups::execute(command, store) {
+        return response;
+    }
     if command[0].eq_ignore_ascii_case(b"ACL") {
         return auth::acl(command);
     }
@@ -1349,44 +1356,7 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
             }
         }
     } else if command[0].eq_ignore_ascii_case(b"XADD") {
-        if command.len() < 5 || command.len().is_multiple_of(2) {
-            protocol::error("wrong number of arguments for 'xadd' command")
-        } else {
-            let mut entries = store.entries.lock().unwrap();
-            remove_expired(&mut entries, &command[1]);
-            let fields = command[3..].to_vec();
-            let result = match entries.get_mut(&command[1]) {
-                Some(Entry {
-                    value: Value::Stream(stream),
-                    ..
-                }) => stream.append(&command[2], fields).map_err(protocol::error),
-                Some(_) => Err(
-                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                        .to_vec(),
-                ),
-                None => {
-                    let mut new_stream = streams::Stream::default();
-                    let id = new_stream.append(&command[2], fields);
-                    if id.is_ok() {
-                        entries.insert(
-                            command[1].clone(),
-                            Entry {
-                                value: Value::Stream(new_stream),
-                                expires_at: None,
-                            },
-                        );
-                    }
-                    id.map_err(protocol::error)
-                }
-            };
-            match result {
-                Ok(id) => {
-                    store.changed.notify_all();
-                    protocol::bulk(id.to_string().as_bytes())
-                }
-                Err(response) => response,
-            }
-        }
+        streams::add_command(command, store)
     } else if command[0].eq_ignore_ascii_case(b"XRANGE")
         || command[0].eq_ignore_ascii_case(b"XREVRANGE")
     {
@@ -1584,7 +1554,9 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
 fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     let name = &command[0];
     let arity = command.len();
-    let valid = if let Some(valid) = auth::valid_arity(command) {
+    let valid = if let Some(valid) = stream_groups::valid_arity(command) {
+        valid
+    } else if let Some(valid) = auth::valid_arity(command) {
         valid
     } else if let Some(valid) = eviction::valid_arity(command) {
         valid
@@ -1650,7 +1622,7 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     } else if name.eq_ignore_ascii_case(b"BZPOPMIN") || name.eq_ignore_ascii_case(b"BZPOPMAX") {
         arity >= 3
     } else if name.eq_ignore_ascii_case(b"XADD") {
-        arity >= 5 && arity % 2 == 1
+        arity >= 5
     } else if name.eq_ignore_ascii_case(b"XDEL") {
         arity >= 3
     } else if name.eq_ignore_ascii_case(b"XTRIM") {
@@ -1830,6 +1802,8 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                     error
                 }
             }
+        } else if command[0].eq_ignore_ascii_case(b"XREADGROUP") {
+            stream_groups::blocking_read(&command, &store)?
         } else if command[0].eq_ignore_ascii_case(b"BLPOP")
             || command[0].eq_ignore_ascii_case(b"BRPOP")
             || command[0].eq_ignore_ascii_case(b"BLMOVE")

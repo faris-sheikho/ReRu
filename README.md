@@ -35,17 +35,17 @@ Run it with `--help` for startup options.
 
 | Area | Implemented scope |
 | --- | --- |
-| Data structures | Strings, lists, hashes, sets, sorted sets, bitmaps, initial streams and geospatial commands |
+| Data structures | Strings, lists, hashes, sets, sorted sets, bitmaps, streams with consumer groups and geospatial commands |
 | Cache behavior | Conditional writes, TTLs, background expiry, ten eviction policies and configurable memory estimates |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH` and `UNWATCH` |
-| Messaging | Local channel/pattern Pub/Sub and blocking list, sorted-set and stream reads |
+| Messaging | Local Pub/Sub, blocking reads, stream acknowledgements and pending-message recovery |
 | Persistence | ReRu snapshots, single-file AOF with background compaction, and a subset of Redis RDB |
 | Replication | Read-only ReRu replicas using a custom full-snapshot protocol |
 | Operations | Client limits, runtime memory configuration and partial `INFO` metrics |
 | Authentication | Default-user passwords, `AUTH`, `ACL WHOAMI` and authenticated ReRu replication |
 
-**178 of 459 command metadata entries** from Redis 8.10.2 have implementation
-paths: **38.8% command-name coverage**. This is not a measure of complete Redis
+**192 of 459 command metadata entries** from Redis 8.10.2 have implementation
+paths: **41.8% command-name coverage**. This is not a measure of complete Redis
 behavior. Supported options, differences and tests are listed in the
 [compatibility inventory](docs/COMPATIBILITY.md).
 
@@ -85,8 +85,8 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-The suite contains **175 tests**, including authentication, restart, expiry, eviction,
-transaction, replication and AOF rewrite coverage. Two reference-dependent tests
+The suite contains **189 tests**, including authentication, restart, expiry, eviction,
+transaction, replication, consumer-group and AOF rewrite coverage. Three reference-dependent tests
 require `RERU_REDIS_REFERENCE_PORT` to run their Redis comparisons. Current
 interoperability checks use Redis 7.0.15; the complete Redis 8.10.2 behavior suite
 has not been validated. See the [development workflow](docs/REA_WORKFLOW.md)
@@ -98,7 +98,7 @@ and SHA-256 checksum under `target/releases`.
 ## Project status
 
 ReRu is suitable for development and compatibility experiments. Remaining work
-includes multi-user ACLs, TLS, RESP3, Lua/functions, stream consumer groups,
+includes multi-user ACLs, TLS, RESP3, Lua/functions, newer stream features,
 PSYNC, clustering/failover, complete RDB/AOF compatibility and performance tuning.
 Memory limits use a logical dataset estimate, not process RSS. Commands are
 serialized and each connection uses an operating-system thread.

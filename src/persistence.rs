@@ -13,11 +13,11 @@ fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid ReRu snapshot")
 }
 
-fn put_u64(output: &mut Vec<u8>, value: u64) {
+pub(crate) fn put_u64(output: &mut Vec<u8>, value: u64) {
     output.extend(value.to_be_bytes());
 }
 
-fn put_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn put_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
     put_u64(output, u64::try_from(bytes.len()).map_err(|_| invalid())?);
     output.extend(bytes);
     if output.len() > MAX_SNAPSHOT {
@@ -26,13 +26,13 @@ fn put_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn read_u64(cursor: &mut Cursor<&[u8]>) -> io::Result<u64> {
+pub(crate) fn read_u64(cursor: &mut Cursor<&[u8]>) -> io::Result<u64> {
     let mut bytes = [0; 8];
     cursor.read_exact(&mut bytes)?;
     Ok(u64::from_be_bytes(bytes))
 }
 
-fn read_bytes(cursor: &mut Cursor<&[u8]>) -> io::Result<Vec<u8>> {
+pub(crate) fn read_bytes(cursor: &mut Cursor<&[u8]>) -> io::Result<Vec<u8>> {
     let len = usize::try_from(read_u64(cursor)?).map_err(|_| invalid())?;
     if len > MAX_SNAPSHOT
         || len
@@ -89,7 +89,7 @@ pub fn encode(entries: &HashMap<Vec<u8>, Entry>) -> io::Result<Vec<u8>> {
                 }
             }
             Value::Stream(stream) => {
-                output.push(7);
+                output.push(8);
                 put_u64(&mut output, stream.last_generated_id.milliseconds);
                 put_u64(&mut output, stream.last_generated_id.sequence);
                 put_u64(
@@ -107,6 +107,7 @@ pub fn encode(entries: &HashMap<Vec<u8>, Entry>) -> io::Result<Vec<u8>> {
                         put_bytes(&mut output, field)?;
                     }
                 }
+                crate::stream_groups::encode_metadata(stream, &mut output)?;
             }
             Value::Hash(fields) => {
                 output.push(4);
@@ -170,8 +171,8 @@ pub fn decode(bytes: &[u8]) -> io::Result<HashMap<Vec<u8>, Entry>> {
                 }
                 Value::List(items)
             }
-            3 | 7 => {
-                let last_generated_id = if kind[0] == 7 {
+            3 | 7 | 8 => {
+                let last_generated_id = if kind[0] >= 7 {
                     Some(streams::StreamId {
                         milliseconds: read_u64(&mut cursor)?,
                         sequence: read_u64(&mut cursor)?,
@@ -215,6 +216,10 @@ pub fn decode(bytes: &[u8]) -> io::Result<HashMap<Vec<u8>, Entry>> {
                     .is_some_and(|entry| stream.last_generated_id < entry.id)
                 {
                     return Err(invalid());
+                }
+                stream.entries_added = stream.entries.len() as u64;
+                if kind[0] == 8 {
+                    crate::stream_groups::decode_metadata(&mut stream, &mut cursor)?;
                 }
                 Value::Stream(stream)
             }
