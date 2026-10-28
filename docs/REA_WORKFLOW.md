@@ -58,7 +58,7 @@ The Rea metadata inspection does not validate RDB behavior or recover source.
 ```powershell
 cargo test --offline
 $env:RERU_REDIS_REFERENCE_PORT = '6391'
-cargo test --offline --test redis_differential --test rdb --test stream_groups
+cargo test --offline --test redis_differential --test rdb --test stream_groups --test hyperloglog --test connection
 Remove-Item Env:RERU_REDIS_REFERENCE_PORT
 python scripts/test_rdb_interop.py --wsl Ubuntu --reru target/debug/reru.exe
 python -B scripts/test_aof_rewrite_interop.py --wsl Ubuntu --reru target/debug/reru.exe
@@ -71,7 +71,7 @@ On Linux, omit `--wsl Ubuntu` and use `target/debug/reru`.
 The AOF script compacts ReRu's file, validates it using `redis-check-aof`, loads
 it in a dedicated Redis server and compares values, expiry deadlines, stream
 IDs, consumer groups, pending ownership, deleted/trimmed message payloads,
-explicit ID resets, and writes issued after rewrite began.
+explicit ID resets, HyperLogLog strings, and writes issued after rewrite began.
 The verified reference in this increment is Redis 7.0.15. Repeat against the
 pinned Redis 8.10.2 before claiming coverage for its newer encodings.
 

@@ -31,6 +31,15 @@ impl Drop for ClientSubscription<'_> {
 }
 
 impl ClientSubscription<'_> {
+    // RESET drops subscriptions without emitting unsubscribe acknowledgements.
+    // Caller holds command_gate so no PUBLISH can race the RESET response.
+    pub fn reset(&self) {
+        if let Some(listener) = self.hub.listeners.lock().unwrap().get_mut(&self.id) {
+            listener.channels.clear();
+            listener.patterns.clear();
+        }
+    }
+
     pub fn active(&self) -> bool {
         self.hub
             .listeners

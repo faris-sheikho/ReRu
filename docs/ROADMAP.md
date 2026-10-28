@@ -9,7 +9,11 @@ partial INFO memory/stats, keyspace and collection scans, and expiry inspection 
 ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
 local Pub/Sub are tested. See the
 [compatibility status](COMPATIBILITY.md) for the current command inventory.
-The latest increment adds stream consumer groups, pending-message recovery,
+The latest increment adds RESP2 HELLO with inline AUTH/SETNAME, CLIENT
+ID/name/library metadata/INFO, SELECT 0 and RESET of connection state.
+It also adds HyperLogLog PFADD/PFCOUNT/PFMERGE, dense/sparse
+interchange, cached counts and persistence/replication integration.
+The preceding increment added stream consumer groups, pending-message recovery,
 XINFO diagnostics, atomic XADD trimming and group persistence/replication.
 The preceding increment added manual BGREWRITEAOF compaction with concurrent-write
 preservation, AOF status/configuration inspection, and recovery tests. It also
@@ -42,7 +46,7 @@ not been selected.
 - Compare observable behavior against a real Redis server and keep regression
   tests for every command before marking it complete.
 - Track command-name presence separately from verified behavior and subsystem
-  coverage. The current 192/459 metadata entries (41.8%) do not establish
+  coverage. The current 203/459 metadata entries (44.2%) do not establish
   30–40% implementation of Redis.
 - Keep the server usable after every small, tested commit.
 

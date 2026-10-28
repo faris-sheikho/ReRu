@@ -1,13 +1,13 @@
 # ReRu compatibility status
 
-Updated: 22 October 2026. This inventory describes the implementation and local
+Updated: 28 October 2026. This inventory describes the implementation and local
 tests; it does not certify complete compatibility with Redis.
 
 ## Implemented commands
 
 | Area | Commands | Current scope |
 | --- | --- | --- |
-| Connection | `PING`, `ECHO` | PING with an optional message; RESP2 requests/replies |
+| Connection | `PING`, `ECHO`, `HELLO`, `SELECT`, `RESET`, `CLIENT ID`, `CLIENT SETNAME`, `CLIENT GETNAME`, `CLIENT SETINFO`, `CLIENT INFO` | RESP2 handshake, optional inline authentication/name, database 0 selection, socket metadata and context reset |
 | Strings/cache | `SET`, `GET`, `INCR`, `GETEX`, `GETDEL`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `INCRBY`, `INCRBYFLOAT`, `DECR`, `DECRBY`, `GETRANGE`, `SUBSTR`, `SETRANGE` | Binary values; SET NX/XX/GET/EX/PX/EXAT/PXAT/KEEPTTL; GETEX expiry/PERSIST; multi-key access, numeric arithmetic and byte ranges |
 | Lists | `RPUSH`, `LPUSH`, `LPUSHX`, `RPUSHX`, `LRANGE`, `LLEN`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LREM`, `LPOS`, `LPOP`, `RPOP`, `RPOPLPUSH`, `LMOVE`, `BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, `LMPOP`, `BLMPOP` | Multiple elements, negative indexes, edits, moves, position search, single/multi-key blocking pops and moves with timeout |
 | Streams | `XADD`, `XRANGE`, `XREVRANGE`, `XREAD`, `XLEN`, `XDEL`, `XTRIM`, `XGROUP CREATE`, `XGROUP SETID`, `XGROUP DESTROY`, `XGROUP CREATECONSUMER`, `XGROUP DELCONSUMER`, `XREADGROUP`, `XACK`, `XPENDING`, `XCLAIM`, `XAUTOCLAIM`, `XINFO GROUPS`, `XINFO CONSUMERS`, `XINFO STREAM`, `XSETID` | IDs, ranges, deletion, exact trimming, blocking reads, consumer groups, pending entries, acknowledgement, claiming and diagnostics; XADD NOMKSTREAM/MAXLEN/MINID |
@@ -15,6 +15,7 @@ tests; it does not certify complete compatibility with Redis.
 | Sets | `SADD`, `SREM`, `SISMEMBER`, `SMISMEMBER`, `SMEMBERS`, `SCARD`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SUNION`, `SINTER`, `SINTERCARD`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `SSCAN` | Binary members, deduplication, membership, cardinality, random selection, atomic moves, set algebra and cursor iteration; SINTERCARD LIMIT |
 | Sorted sets | `ZADD`, `ZINCRBY`, `ZCARD`, `ZSCORE`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANGEBYLEX`, `ZREVRANGEBYLEX`, `ZCOUNT`, `ZLEXCOUNT`, `ZREM`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYLEX`, `ZMSCORE`, `ZSCAN`, `ZPOPMIN`, `ZPOPMAX`, `ZMPOP`, `BZMPOP`, `BZPOPMIN`, `BZPOPMAX`, `ZUNION`, `ZUNIONSTORE`, `ZINTER`, `ZINTERSTORE`, `ZDIFF`, `ZDIFFSTORE`, `ZINTERCARD` | Score-ordered members, rank, score and lex ranges, ZADD NX/XX/GT/LT/CH/INCR, cursor iteration, range removal, ordered and multi-key blocking pops, weighted algebra and destination storing |
 | Bitmaps | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS`, `BITFIELD`, `BITFIELD_RO` | Bitmaps stored as strings, byte/bit count ranges, AND/OR/XOR/NOT; bitfield GET/SET/INCRBY, signed/unsigned widths, `#` offsets and WRAP/SAT/FAIL overflow modes |
+| HyperLogLog | `PFADD`, `PFCOUNT`, `PFMERGE` | Approximate distinct counts, multi-key unions, binary members, Redis dense/sparse interchange, cached cardinality |
 | Geospatial | `GEOADD`, `GEOPOS`, `GEOHASH`, `GEODIST`, `GEOSEARCH`, `GEOSEARCHSTORE` | Geo points use sorted-set scores; NX/XX/CH, positions and distances, radius/box search, sort/count, decorated results, and destination storing |
 | Keyspace | `TYPE`, `DEL`, `UNLINK`, `EXISTS`, `TOUCH`, `DBSIZE`, `KEYS`, `SCAN`, `RANDOMKEY`, `COPY`, `RENAME`, `RENAMENX`, `TTL`, `PTTL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST`, `FLUSHDB`, `FLUSHALL` | Multiple keys, glob and type filtered scanning, rename/copy with TTL, relative/absolute expiry conditions, whole-database flush |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` | Queuing, atomic execution relative to other commands, runtime errors, optimistic locking |
@@ -26,7 +27,7 @@ tests; it does not certify complete compatibility with Redis.
 | Server time | `TIME` | Epoch seconds and microseconds as RESP2 bulk strings |
 | Persistence | `SAVE`, `BGSAVE`, `LASTSAVE`, `DUMP`, `RESTORE`, `BGREWRITEAOF` | Initial Redis RDB interoperability; supported values, key expiry, checksums, REPLACE/ABSTTL; manual single-file AOF compaction |
 
-Total: **192 Redis command metadata entries**, or **41.8% name presence**
+Total: **203 Redis command metadata entries**, or **44.2% name presence**
 against 459 entries in the pinned Redis 8.10.2 metadata. This is neither a
 behavior pass rate nor a percentage of Redis completed. Run
 `powershell -File scripts/command_coverage.ps1 -RedisSource PATH_TO_REDIS_8_10_2`
@@ -159,6 +160,47 @@ Approximate trimming (`~`), `LIMIT`, reference-aware trimming options, and newer
 stream features remain unimplemented. New stream snapshots use a revised type
 tag; new builds read older tags, but older builds cannot read new snapshots.
 
+## HyperLogLog
+
+`PFADD` accepts binary members and creates an empty sketch when called without
+members on a missing key. It returns 1 only when a key is created or a register
+changes; duplicate/no-op additions leave the stored bytes and WATCH unchanged.
+`PFCOUNT` returns zero for missing keys and estimates a multi-key union without
+creating a destination. `PFMERGE` includes the existing destination, supports
+aliased or missing source keys, and preserves the destination's TTL. All source
+values are validated before replacing the destination.
+
+Sketches are Redis strings with the HYLL header, 16,384 six-bit registers,
+MurmurHash64A member hashing and the Ertl improved raw cardinality estimator.
+The commands estimate distinct counts; they do not retain members or provide
+exact counts, membership queries or element deletion.
+
+New or changed sketches use a 12,304-byte dense value (including the header).
+Imported sparse strings are readable and remain unchanged on no-op PFADD;
+changes and PFMERGE produce dense storage. Redis's sparse update strategy,
+configurable sparse promotion threshold and SIMD optimizations are not
+implemented. This trades small-sketch memory efficiency for simpler storage.
+
+Single-key PFCOUNT uses the cached cardinality when valid. Recomputing a dirty
+cache updates the string header, invalidates WATCH and persists/replicates that
+change, including inside EXEC. It remains a read command usable on replicas
+and above maxmemory. Multi-key counts never update source caches. As in Redis,
+a valid cache is trusted; arbitrary user edits to HYLL bytes can produce
+meaningless counts. Decoding rejects malformed sparse runs and dense register
+ranks above 51; the latter is stricter than Redis for manually corrupted values.
+Estimates exceeding the RESP signed-integer range saturate at i64::MAX.
+
+Values participate in TTL, transactions, noeviction rollback, snapshots, AOF
+rewrite/replay, RDB, DUMP/RESTORE and ReRu replication through string storage.
+Tests compare 40,000 binary/text elements, cardinalities, union and merge results,
+dense bytes, sparse imports and DUMP exchange against Redis 7.0.15. These are
+representative interoperability checks, not a complete numerical proof or a
+large-scale performance benchmark.
+
+References: [Redis HyperLogLog](https://redis.io/docs/latest/develop/data-types/probabilistic/hyperloglogs/),
+[PFCOUNT](https://redis.io/docs/latest/commands/pfcount/),
+[Ertl's estimator](https://arxiv.org/abs/1702.01284).
+
 ## Stream consumer groups
 
 `XGROUP CREATE/SETID` supports explicit IDs or `$`, optional `ENTRIESREAD`, and
@@ -290,6 +332,44 @@ fixed `always` fsync policy; changing these through CONFIG SET is unsupported.
 
 Behavior reference: [Redis BGREWRITEAOF](https://redis.io/docs/latest/commands/bgrewriteaof/).
 
+## Client connection lifecycle
+
+`HELLO` and `HELLO 2` return a RESP2 properties array containing ReRu's actual
+name/version, protocol 2, stable connection ID, standalone mode, primary/replica
+role and an empty modules list. AUTH default password and SETNAME options are
+supported. All options are validated before authentication/name changes; failed
+credentials preserve an existing authenticated session. `HELLO 3` returns NOPROTO
+without changing authentication or the protocol. RESP3 remains unimplemented.
+
+`CLIENT ID` identifies the socket until disconnect, including across RESET.
+GETNAME returns nil when unnamed; SETNAME with an empty value clears the name.
+Names and library metadata accept printable ASCII without whitespace. SETINFO
+supports LIB-NAME and LIB-VER. INFO returns a subset: ID, peer/local addresses,
+name, age, database, default user, RESP version and library metadata. CLIENT LIST,
+KILL, UNBLOCK, TRACKING, detailed buffer metrics and other client operations
+remain pending. Metadata is local to the connection and is never persisted.
+
+`SELECT 0` supports clients that explicitly select the default database. Nonzero
+databases fail explicitly; multiple logical databases remain unimplemented.
+Connection commands can be queued in MULTI and executed in order without
+invalidating dataset watches. They are usable on read-only replicas.
+
+`RESET` executes immediately, including in MULTI, during subscription mode and
+before authentication. It discards queued commands/errors, clears WATCH,
+removes channel/pattern subscriptions without extra unsubscribe replies, clears
+the client name and restores startup authentication requirements. Socket ID and
+library metadata remain. On a password-protected server, AUTH or HELLO AUTH is
+required again. RESET does not change replica read-only status or dataset data.
+
+Tests cover session isolation, validation, authentication state, transaction
+errors, subscription cleanup and replicas. Common connection sequences pass
+against Redis 7.0.15. SETINFO is a newer command tested locally against the
+specified behavior; its reference-server comparison remains pending.
+
+References: [HELLO](https://redis.io/docs/latest/commands/hello/),
+[RESET](https://redis.io/docs/latest/commands/reset/),
+[CLIENT SETINFO](https://redis.io/docs/latest/commands/client-setinfo/).
+
 ## Authentication
 
 `--requirepass PASSWORD` or `--requirepass-file FILE` configures the default
@@ -298,7 +378,7 @@ to 4096 bytes and strip a single trailing LF or CRLF; remaining bytes, including
 spaces and binary bytes, are part of the password. The last supplied password
 option wins. Prefer file options to avoid credentials appearing in process arguments.
 
-Unauthenticated connections receive NOAUTH for commands other than AUTH and QUIT,
+Unauthenticated connections receive NOAUTH for commands other than AUTH, HELLO, RESET and QUIT,
 including replication handshakes, subscriptions, configuration and transactions.
 `AUTH password` and `AUTH default password` authenticate one connection. Invalid
 credentials return WRONGPASS and preserve any existing authenticated session.
@@ -328,12 +408,13 @@ can issue subscription commands, PING and QUIT. Disconnects remove their
 subscriptions. Delivery is at-most-once; messages are not persisted or
 replicated, and clients on other ReRu servers do not receive them. Writes to a
 subscriber socket are synchronous with a 500 ms timeout; slow-client buffering
-and backpressure do not yet match Redis. RESET, sharded Pub/Sub, keyspace
-notifications, and Pub/Sub ACLs remain pending.
+and backpressure do not yet match Redis. Sharded Pub/Sub, keyspace
+notifications, and Pub/Sub ACLs remain pending. RESET clears subscriptions and
+returns the connection to ordinary RESP2 command mode.
 
 ## Verification for this increment
 
-The local suite has **189 tests**: 18 unit tests and 171 server integration tests.
+The local suite has **204 tests**: 20 unit tests and 184 server integration tests.
 It covers binary values, wrong types, score ordering and updates, bitmap ranges,
 SET conditions and expiry, multi-key atomicity, WATCH/MULTI/EXEC, snapshot
 restart, AOF replay and partial tails, replica updates, and malformed snapshot payloads. Earlier keyspace,
@@ -361,6 +442,15 @@ TTL, WATCH, OOM rollback, restart/rewrite and replica updates. An additional
 reference-dependent test compares group command sequences and XADD options
 against Redis 7.0.15; it skips comparisons if the reference port is unset.
 
+HyperLogLog tests add binary members, merge aliasing, malformed input, cached
+counts/WATCH, sparse-to-dense OOM rollback, expiry, persistence, replication and
+a fourth reference-dependent comparison with Redis. Two unit tests cover packed
+register boundaries and malformed sparse runs.
+
+Connection tests cover HELLO option validation, per-socket metadata, password
+reset, queued connection commands, WATCH/subscription cleanup and read-only
+replicas. A fifth reference-dependent test compares common connection sequences.
+
 The suite includes an optional deterministic RESP2 differential test covering
 representative strings, lists, hashes, sets, sorted sets, streams, and transactions.
 It passed against a local Redis 7.0.15 instance with
@@ -373,7 +463,7 @@ TTL, invalid checksums, failed replacement, WATCH, transactions, OOM rollback,
 and AOF restart. With `RERU_REDIS_REFERENCE_PORT` set, the RDB suite exchanges
 DUMP payloads with Redis 7.0.15, including compressed and integer strings,
 quicklist2, intset, hash listpack and sorted-set listpack encodings. Without
-that variable, this second reference-dependent test also skips comparisons.
+that variable, this reference-dependent test also skips comparisons.
 `scripts/test_rdb_interop.py` additionally creates dedicated temporary servers,
 exchanges complete RDB files in both directions, and runs `redis-check-rdb`.
 Run instructions are in [the development workflow](REA_WORKFLOW.md).

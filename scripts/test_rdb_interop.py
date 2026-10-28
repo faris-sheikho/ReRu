@@ -88,6 +88,7 @@ def seed(client):
         ("SADD", "intset", "-32769", "42", "9223372036854775807"),
         ("ZADD", "sorted", "1.25", "a", "-inf", "b"),
         ("GEOADD", "geo", "13.361389", "38.115556", "Palermo"),
+        ("PFADD", "hll", "visitor-a", "visitor-b", b"\x00\xff"),
         ("SET", "ttl", "expires", "PX", "60000"),
     ]
     for command in commands:
@@ -102,6 +103,7 @@ def verify(left, right):
         ("SMISMEMBER", "intset", "-32769", "42", "9223372036854775807"),
         ("ZRANGE", "sorted", "0", "-1", "WITHSCORES"),
         ("GEOPOS", "geo", "Palermo"), ("GET", "ttl"),
+        ("PFCOUNT", "hll"), ("GET", "hll"),
     ]:
         assert left.call(*query) == right.call(*query), query
     assert 0 < left.call("PTTL", "ttl") <= 60000
@@ -147,7 +149,7 @@ def main():
                 restored = reference("reru.rdb")
                 verify(restored, rebuilt)
                 assert restored.call("GET", "written-by-reru") == b"yes"
-                print("PASS: Redis -> RDB -> ReRu -> RDB -> Redis; CRC, collections, geo, binary data, compression and TTL")
+                print("PASS: Redis -> RDB -> ReRu -> RDB -> Redis; CRC, collections, geo, HyperLogLog, binary data, compression and TTL")
         finally:
             for process, client, redis in reversed(processes):
                 if redis and process.poll() is None:

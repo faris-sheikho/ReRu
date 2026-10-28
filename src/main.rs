@@ -4,9 +4,11 @@ mod bitmaps;
 mod cache;
 mod clients;
 mod collections;
+mod connection;
 mod eviction;
 mod expiry;
 mod geo;
+mod hyperloglog;
 mod keyspace;
 mod list_ops;
 mod persistence;
@@ -173,6 +175,7 @@ fn is_mutating(command: &[Vec<u8>]) -> bool {
         || cache::is_mutating(command)
         || geo::is_mutating(command)
         || list_ops::is_mutating(command)
+        || hyperloglog::is_mutating(command)
         || bitmaps::is_mutating(command)
         || sorted_sets::is_mutating(command)
         || collections::is_mutating(command)
@@ -221,6 +224,7 @@ fn record_write(store: &Store, command: &[Vec<u8>], response: &[u8]) {
         || rdb::valid_arity(command).is_some()
         || geo::valid_arity(command).is_some()
         || list_ops::valid_arity(command).is_some()
+        || hyperloglog::valid_arity(command).is_some()
         || bitmaps::valid_arity(command).is_some()
         || sorted_sets::valid_arity(command).is_some()
         || collections::valid_arity(command).is_some()
@@ -1002,6 +1006,8 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
         response
     } else if let Some(response) = list_ops::execute(command, store) {
         response
+    } else if let Some(response) = hyperloglog::execute(command, store) {
+        response
     } else if let Some(response) = bitmaps::execute(command, store) {
         response
     } else if let Some(response) = sorted_sets::execute(command, store) {
@@ -1554,7 +1560,9 @@ fn execute_command(command: &[Vec<u8>], store: &Store, allow_blocking: bool) -> 
 fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     let name = &command[0];
     let arity = command.len();
-    let valid = if let Some(valid) = stream_groups::valid_arity(command) {
+    let valid = if let Some(valid) = connection::valid_arity(command) {
+        valid
+    } else if let Some(valid) = stream_groups::valid_arity(command) {
         valid
     } else if let Some(valid) = auth::valid_arity(command) {
         valid
@@ -1574,6 +1582,8 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
     } else if let Some(valid) = geo::valid_arity(command) {
         valid
     } else if let Some(valid) = list_ops::valid_arity(command) {
+        valid
+    } else if let Some(valid) = hyperloglog::valid_arity(command) {
         valid
     } else if let Some(valid) = bitmaps::valid_arity(command) {
         valid
@@ -1645,6 +1655,7 @@ fn validate_queued(command: &[Vec<u8>]) -> Result<(), Vec<u8>> {
 }
 
 fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
+    let mut session = connection::Session::new(&stream)?;
     let mut reader = BufReader::new(stream.try_clone()?);
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
     let subscription = store
@@ -1658,8 +1669,28 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
         if !authenticated
             && !command[0].eq_ignore_ascii_case(b"AUTH")
             && !command[0].eq_ignore_ascii_case(b"QUIT")
+            && !command[0].eq_ignore_ascii_case(b"HELLO")
+            && !command[0].eq_ignore_ascii_case(b"RESET")
         {
             subscription.write(b"-NOAUTH Authentication required.\r\n")?;
+            continue;
+        }
+        if command[0].eq_ignore_ascii_case(b"RESET") {
+            if command.len() != 1 {
+                transaction_error |= transaction.is_some();
+                subscription.write(&protocol::error(
+                    "wrong number of arguments for 'reset' command",
+                ))?;
+                continue;
+            }
+            let _gate = store.command_gate.lock().unwrap();
+            transaction = None;
+            transaction_error = false;
+            watches.clear();
+            subscription.reset();
+            session.reset();
+            authenticated = !store.auth.required();
+            subscription.write(b"+RESET\r\n")?;
             continue;
         }
         if command[0].eq_ignore_ascii_case(b"REPLSYNC") && !store.read_only {
@@ -1708,7 +1739,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                 subscription.write(&reply)?;
             } else {
                 subscription.write(&protocol::error(
-                    "Can't execute command while subscribed; only (P|S)SUBSCRIBE, (P|S)UNSUBSCRIBE, PING and QUIT are allowed",
+                    "Can't execute command while subscribed; only (P|S)SUBSCRIBE, (P|S)UNSUBSCRIBE, PING, RESET and QUIT are allowed",
                 ))?;
             }
             continue;
@@ -1773,10 +1804,16 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
                         b"*-1\r\n".to_vec()
                     } else {
                         let mut response = format!("*{}\r\n", queued.len()).into_bytes();
-                        let writes = queued.iter().any(|command| is_mutating(command));
+                        let writes = queued.iter().any(|command| {
+                            is_mutating(command) || hyperloglog::may_update_cache(command)
+                        });
                         for queued_command in queued {
                             let result = if queued_command[0].eq_ignore_ascii_case(b"AUTH") {
                                 store.auth.authenticate(&queued_command, &mut authenticated)
+                            } else if let Some(response) =
+                                session.execute(&queued_command, &store, &mut authenticated)
+                            {
+                                response
                             } else {
                                 execute_checked(&queued_command, &store, false)
                             };
@@ -1816,15 +1853,17 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
         {
             let response = execute_command(&command, &store, true);
             record_write(&store, &command, &response);
-            if is_mutating(&command) {
+            if is_mutating(&command) || hyperloglog::may_update_cache(&command) {
                 let _gate = store.command_gate.lock().unwrap();
                 save_and_publish(&store)?;
             }
             response
         } else {
             let _gate = store.command_gate.lock().unwrap();
-            let response = execute_checked(&command, &store, true);
-            if is_mutating(&command) {
+            let response = session
+                .execute(&command, &store, &mut authenticated)
+                .unwrap_or_else(|| execute_checked(&command, &store, true));
+            if is_mutating(&command) || hyperloglog::may_update_cache(&command) {
                 save_and_publish(&store)?;
             }
             response

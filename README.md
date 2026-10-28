@@ -36,16 +36,18 @@ Run it with `--help` for startup options.
 | Area | Implemented scope |
 | --- | --- |
 | Data structures | Strings, lists, hashes, sets, sorted sets, bitmaps, streams with consumer groups and geospatial commands |
+| Approximate counting | HyperLogLog distinct counts and unions, with Redis binary-format interchange |
 | Cache behavior | Conditional writes, TTLs, background expiry, ten eviction policies and configurable memory estimates |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH` and `UNWATCH` |
 | Messaging | Local Pub/Sub, blocking reads, stream acknowledgements and pending-message recovery |
 | Persistence | ReRu snapshots, single-file AOF with background compaction, and a subset of Redis RDB |
 | Replication | Read-only ReRu replicas using a custom full-snapshot protocol |
+| Client connections | HELLO 2, SELECT 0, connection IDs/names/library metadata and RESET |
 | Operations | Client limits, runtime memory configuration and partial `INFO` metrics |
 | Authentication | Default-user passwords, `AUTH`, `ACL WHOAMI` and authenticated ReRu replication |
 
-**192 of 459 command metadata entries** from Redis 8.10.2 have implementation
-paths: **41.8% command-name coverage**. This is not a measure of complete Redis
+**203 of 459 command metadata entries** from Redis 8.10.2 have implementation
+paths: **44.2% command-name coverage**. This is not a measure of complete Redis
 behavior. Supported options, differences and tests are listed in the
 [compatibility inventory](docs/COMPATIBILITY.md).
 
@@ -85,8 +87,8 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-The suite contains **189 tests**, including authentication, restart, expiry, eviction,
-transaction, replication, consumer-group and AOF rewrite coverage. Three reference-dependent tests
+The suite contains **204 tests**, including authentication, restart, expiry, eviction,
+transaction, replication, consumer-group, HyperLogLog, connection lifecycle and AOF rewrite coverage. Five reference-dependent tests
 require `RERU_REDIS_REFERENCE_PORT` to run their Redis comparisons. Current
 interoperability checks use Redis 7.0.15; the complete Redis 8.10.2 behavior suite
 has not been validated. See the [development workflow](docs/REA_WORKFLOW.md)

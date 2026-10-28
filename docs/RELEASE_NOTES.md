@@ -1,6 +1,6 @@
 # ReRu 0.1.0-alpha.1
 
-22 October 2026 — experimental preview for local evaluation.
+28 October 2026 — experimental preview for local evaluation.
 
 ## Included
 
@@ -18,9 +18,26 @@
 - Default-user AUTH, ACL WHOAMI, password-file configuration and authenticated
   ReRu replication; multi-user ACL rules and TLS remain pending.
 
-The command inventory has 192 of 459 Redis 8.10.2 metadata names (41.8%).
+The command inventory has 203 of 459 Redis 8.10.2 metadata names (44.2%).
 This measures names with implementation paths, not complete behavior or a
 percentage of Redis rebuilt. See [compatibility](COMPATIBILITY.md).
+
+### Connection increment
+
+- HELLO/HELLO 2 with inline AUTH and SETNAME; unsupported RESP3 fails explicitly.
+- CLIENT ID, SETNAME, GETNAME, SETINFO and partial INFO; SELECT 0.
+- RESET clears transactions, watches, subscriptions, names and authentication
+  while preserving the socket identity and library metadata.
+- Transaction, replica, authentication and real Redis connection comparisons.
+
+### HyperLogLog increment
+
+- PFADD, single/multi-key PFCOUNT and PFMERGE with binary members and TTL.
+- Redis HYLL dense output, sparse input, cached counts and WATCH integration.
+- Snapshot, AOF, RDB and DUMP/RESTORE round trips plus replica updates.
+- Redis comparisons across 40,000 elements, merge results and binary payloads.
+- Dense output uses 12,304 bytes even for small sketches; sparse writes and SIMD
+  optimization remain pending. Counts are approximate.
 
 ### Stream increment
 
@@ -52,7 +69,7 @@ creating it does not publish a GitHub Release.
 
 ## Verification
 
-189 local tests cover the implemented subset, with optional real-server
+204 local tests cover the implemented subset, with optional real-server
 comparisons enabled against Redis 7.0.15. RDB file exchange is additionally
 checked in both directions with `redis-check-rdb`. Formatting, Clippy with
 warnings denied, and an optimized Windows build are release checks.
