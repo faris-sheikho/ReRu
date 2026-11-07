@@ -1,90 +1,88 @@
 # ReRu 0.1.0-alpha.1
 
-28 October 2026 — experimental preview for local evaluation.
+7 November 2026 — experimental preview for local evaluation.
 
-## Included
+## Highlights
 
-- Rust RESP2 server with strings, lists, hashes, sets, sorted sets, bitmaps,
-  streams with consumer groups and geospatial commands.
-- Transactions and WATCH, local Pub/Sub, TTLs, ten eviction policies and runtime
-  memory configuration.
-- Background expiry with bounded deletion batches; persisted/replicated deletions,
-  startup index rebuilding, and expiry metrics.
-- Configurable connection limits, connection statistics, `--help` and `--version`.
-- Custom snapshots, initial AOF, ReRu-to-ReRu replication, and a subset of Redis
-  RDB including SAVE/BGSAVE and DUMP/RESTORE.
-- Manual BGREWRITEAOF compaction preserving concurrent writes, with AOF status
-  fields and read-only appendonly/appendfsync configuration inspection.
-- Default-user AUTH, ACL WHOAMI, password-file configuration and authenticated
-  ReRu replication; multi-user ACL rules and TLS remain pending.
+- RESP2 server with strings, lists, hashes, sets, sorted sets, bitmaps, streams
+  with consumer groups, and geospatial commands.
+- Transactions and `WATCH`, local Pub/Sub, TTLs, ten eviction policies, and
+  runtime memory configuration.
+- Background expiry with bounded deletion batches, persisted and replicated
+  deletions, startup index rebuilding, and expiry metrics.
+- Custom snapshots, single-file AOF with online rewrite, a subset of Redis RDB,
+  and authenticated ReRu-to-ReRu replication.
+- Default-user `AUTH`, `ACL WHOAMI`, password-file configuration, and
+  authenticated replication. Multi-user ACLs and TLS remain pending.
+- `--bind ADDRESS` so the server can listen on a container network while still
+  defaulting to loopback.
 
 The command inventory has 203 of 459 Redis 8.10.2 metadata names (44.2%).
 This measures names with implementation paths, not complete behavior or a
 percentage of Redis rebuilt. See [compatibility](COMPATIBILITY.md).
 
-### Connection increment
+## Open-source packaging
 
-- HELLO/HELLO 2 with inline AUTH and SETNAME; unsupported RESP3 fails explicitly.
-- CLIENT ID, SETNAME, GETNAME, SETINFO and partial INFO; SELECT 0.
-- RESET clears transactions, watches, subscriptions, names and authentication
-  while preserving the socket identity and library metadata.
-- Transaction, replica, authentication and real Redis connection comparisons.
-
-### HyperLogLog increment
-
-- PFADD, single/multi-key PFCOUNT and PFMERGE with binary members and TTL.
-- Redis HYLL dense output, sparse input, cached counts and WATCH integration.
-- Snapshot, AOF, RDB and DUMP/RESTORE round trips plus replica updates.
-- Redis comparisons across 40,000 elements, merge results and binary payloads.
-- Dense output uses 12,304 bytes even for small sketches; sparse writes and SIMD
-  optimization remain pending. Counts are approximate.
-
-### Stream increment
-
-- Consumer-group lifecycle, blocking multi-stream delivery, NOACK, pending
-  inspection, acknowledgement, manual claiming and automatic recovery.
-- Group/consumer/stream diagnostics, including FULL pending-entry details.
-- Snapshot, AOF rewrite/replay and ReRu replication of group state; deleted and
-  trimmed pending messages survive restart. AOF consumer idle times can reset.
-- Atomic XADD NOMKSTREAM/MAXLEN/MINID, retained-entry metadata and ID reset checks.
-- Concurrent-consumer, persistence, memory rollback and real Redis comparisons.
+- **License:** AGPL-3.0-only. Modified versions and hosted forks must publish
+  their source. The implementation is clean-room; no Redis source is translated.
+- Contributing guide, code of conduct, security policy, changelog, architecture
+  notes, development guide, and interoperability testing guide.
+- CI runs formatting, Clippy, and tests on Linux, macOS, and Windows, plus the
+  1.88 minimum toolchain and rustdoc. A dependency audit runs weekly.
+- `Dockerfile`, dev container, `Makefile`, and `cargo` aliases. A new contributor
+  can clone, run `make setup`, and run `make test`.
+- 20 scoped issues with `good first issue`, `help wanted`, area, and difficulty
+  labels.
 
 ## Build and try
 
 ```sh
+git clone https://github.com/mansiverma897993/ReRu.git
+cd ReRu
+make setup
+make test
+make run
+```
+
+Without `make`:
+
+```sh
+cargo fetch
 cargo test
-cargo build --release
-./target/release/reru --version
-./target/release/reru --maxmemory 64mb --maxmemory-policy allkeys-lru --maxclients 256
+cargo run -- --port 6379
+```
+
+Then:
+
+```sh
 redis-cli SET hello world EX 60
 redis-cli GET hello
 ```
 
-On Windows use `target\release\reru.exe`. The server binds to loopback only.
-Data is in memory unless a persistence option is supplied. Run `reru --help`
-and see the README for the mutually exclusive persistence modes.
-`powershell -File scripts/package_windows.ps1` builds a Windows x86_64 ZIP and
-SHA-256 checksum in `target/releases`. The package is a local preview artifact;
-creating it does not publish a GitHub Release.
+On Windows use `target\release\reru.exe`. The server binds to loopback unless
+`--bind` is set. Data is in memory unless a persistence option is supplied. Run
+`reru --help` and see the README for the mutually exclusive persistence modes.
 
 ## Verification
 
-204 local tests cover the implemented subset, with optional real-server
-comparisons enabled against Redis 7.0.15. RDB file exchange is additionally
-checked in both directions with `redis-check-rdb`. Formatting, Clippy with
-warnings denied, and an optimized Windows build are release checks.
-Redis 8.10.2 behavior, large-scale performance and crash fault injection have
-not been comprehensively validated.
+204 tests cover the implemented subset, with optional comparisons against a
+live Redis 7.0.15 server. RDB file exchange is checked in both directions with
+`redis-check-rdb`. Formatting, Clippy with warnings denied, and an optimized
+build are release checks. Redis 8.10.2 behavior, large-scale performance, and
+crash fault injection have not been comprehensively validated.
 
 ## Release limits
 
 Full cache compatibility is unfinished: memory is estimated, command execution
-is serialized, expiry/persistence can block, and several memory/queue limits
-remain unbounded. Cluster, Sentinel/failover, PSYNC, multi-user ACLs, TLS,
-RESP3, scripting/functions, newer stream features, complete RDB/AOF support
-and many command options remain pending. Replication only connects matching
-ReRu builds. This preview is not a production Redis replacement.
+is serialized, and expiry and persistence can block. Several memory and queue
+limits remain unbounded. Cluster, Sentinel and failover, PSYNC, multi-user ACLs,
+TLS, RESP3, scripting and functions, newer stream features, complete RDB/AOF
+support, and many command options remain pending. Replication only connects
+matching ReRu builds.
 
-No upstream Redis C source was translated for this increment. Repository-wide
-license selection and attribution review remain release tasks before presenting
-this as a redistributable, licensed open-source release.
+This preview is not a production Redis replacement.
+
+## License
+
+ReRu is licensed under the GNU Affero General Public License v3.0
+(`AGPL-3.0-only`). See [LICENSE](../LICENSE) and [NOTICE](../NOTICE).
