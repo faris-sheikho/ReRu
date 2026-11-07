@@ -4,7 +4,6 @@
 
 <br>
 
-[![CI](https://img.shields.io/github/actions/workflow/status/mansiverma897993/ReRu/ci.yml?style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/mansiverma897993/ReRu/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-DEA584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-experimental-F97316?style=flat-square)](docs/ROADMAP.md)
