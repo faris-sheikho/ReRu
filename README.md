@@ -223,12 +223,20 @@ beyond local development.
 
 <br>
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/mansiverma897993/ReRu)
+
 ```sh
-cargo build                    # debug build
-cargo test                     # 204 tests
-cargo fmt --all -- --check     # formatting
-cargo clippy --all-targets -- -D warnings   # lints
+git clone https://github.com/mansiverma897993/ReRu.git
+cd ReRu
+make setup     # or: cargo fetch
+make test      # 204 tests
+make run       # or: cargo run -- --port 6379
+make check     # fmt + clippy + tests
 ```
+
+`make` is optional. The `cargo` aliases in `.cargo/config.toml` work on every
+platform, including Windows. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for
+single-test commands, editor setup, and troubleshooting.
 
 Reference-dependent tests compare behavior against a live Redis server and run
 only when `RERU_REDIS_REFERENCE_PORT` is set. Set it to the port of a running
@@ -244,9 +252,11 @@ and SHA-256 checksum under `target/releases`.
 ```
 src/            server modules (one per subsystem)
 tests/          integration tests, one file per area
-docs/           compatibility, roadmap, architecture, testing notes
+docs/           compatibility, roadmap, architecture, development, testing
 docs/assets/    banner, diagram, and social preview
 scripts/        packaging and Redis interoperability helpers
+.cargo/         cargo aliases used by the development guide
+.devcontainer/  container and Codespaces setup
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces fit

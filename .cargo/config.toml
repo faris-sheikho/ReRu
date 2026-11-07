@@ -1,0 +1,9 @@
+[alias]
+# cargo fmt-check
+fmt-check = "fmt --all -- --check"
+# cargo lint
+lint = "clippy --all-targets -- -D warnings"
+# cargo test-all
+test-all = "test --all-targets"
+# cargo serve --port 6379
+serve = "run --"

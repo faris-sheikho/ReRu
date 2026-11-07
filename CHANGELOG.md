@@ -18,6 +18,9 @@ Because ReRu is pre-1.0, minor versions may include breaking changes.
   issue and pull request templates, and CI.
 - README banner, at-a-glance statistics, feature cards, architecture diagram,
   and social preview assets.
+- One-command development setup: `Makefile`, `cargo` aliases, a pinned toolchain,
+  a dev container, VS Code recommendations, and `docs/DEVELOPMENT.md` with
+  troubleshooting.
 
 ### Changed
 

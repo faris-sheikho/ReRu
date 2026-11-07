@@ -27,16 +27,24 @@ programs we take part in, and the launch plan.
 
 Requirements:
 
-- Rust 1.88 or newer (`rustup toolchain install stable`)
+- Rust 1.88 or newer (`rustup` recommended; `rust-toolchain.toml` pins stable)
 - A C toolchain (standard for Rust builds)
+- Optional: `make` for the convenience targets
 - Optional: `redis-server` and `redis-cli` for differential tests
 
 ```sh
 git clone https://github.com/mansiverma897993/ReRu.git
 cd ReRu
-cargo build
-cargo test
+make setup      # or: cargo fetch
+make test       # or: cargo test
+make run        # or: cargo run -- --port 6379
 ```
+
+`make` is not required. The `cargo` aliases in `.cargo/config.toml` work on
+every platform, including Windows PowerShell.
+
+The full guide, with single-test commands, editor setup, and troubleshooting,
+is in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Before you open a pull request
 

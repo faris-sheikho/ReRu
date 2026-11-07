@@ -7,6 +7,7 @@ repository. Human contributors should read [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map and command path.
   Read it before changing `src/main.rs`.
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — setup, commands, and troubleshooting.
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — what is implemented, what
   differs from Redis, and what is untested.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — priorities.
@@ -36,7 +37,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-All three must pass. Extensive changes should also run
+Or run `make check`, which executes all three. Extensive changes should also run
 `cargo build --release`.
 
 ## Where code goes

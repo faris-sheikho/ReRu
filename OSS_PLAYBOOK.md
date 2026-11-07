@@ -15,7 +15,7 @@ Last updated: 7 November 2026.
 | License | AGPL-3.0-only, clean-room rule in `CONTRIBUTING.md` |
 | Governance | `CONTRIBUTING`, `CODE_OF_CONDUCT`, `SECURITY`, `CHANGELOG`, `AGENTS` |
 | CI | GitHub Actions: fmt, clippy, test on Linux/macOS/Windows, MSRV, rustdoc, audit |
-| Docs | README with banner and cards, architecture, compatibility, interop testing |
+| Docs | README, architecture, compatibility, development guide, interop testing |
 | Issues | 20 scoped tasks created (#5–#24) |
 | **Blocker** | **Repository is private. Only the owner can make it public and set the description and topics.** |
 
