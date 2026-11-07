@@ -5,7 +5,6 @@ mod client;
 mod common;
 
 use client::{array, integer, Client, Reply};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn bulk(bytes: &[u8]) -> Reply {
     Reply::Bulk(Some(bytes.to_vec()))
@@ -140,15 +139,8 @@ fn stream_deletion_keeps_last_generated_id_and_empty_key() {
 
 #[test]
 fn stream_last_id_survives_snapshot_and_aof_restarts() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
     for (mode, extension) in [("--snapshot", "snap"), ("--appendonly", "aof")] {
-        let path = std::env::temp_dir().join(format!(
-            "reru-stream-{mode}-{}-{unique}.{extension}",
-            std::process::id()
-        ));
+        let path = common::temp_path(&format!("reru-stream-{mode}"), &format!(".{extension}"));
         let filename = path.to_str().unwrap();
         {
             let server = common::Server::start_with(&[mode, filename]);

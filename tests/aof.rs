@@ -9,11 +9,7 @@ use common::Server;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn path() -> std::path::PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reru-aof-{}-{unique}.aof", std::process::id()))
+    common::temp_path("reru-aof", ".aof")
 }
 
 fn bulk(value: &[u8]) -> Reply {

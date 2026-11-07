@@ -20,7 +20,7 @@ try {
     $archive = Join-Path $output "ReRu-$version-windows-x86_64.zip"
     $contents = @($binary, 'README.md', 'THIRD_PARTY_NOTICES.md', 'docs/COMPATIBILITY.md',
         'docs/ROADMAP.md', 'docs/RELEASE_NOTES.md',
-        'docs/REA_WORKFLOW.md', 'docs/ReRu_Implementation_Plan.pdf')
+        'docs/ARCHITECTURE.md', 'docs/INTEROP_TESTING.md', 'CHANGELOG.md')
     # Preserve documentation paths and README relative links in the archive.
     Add-Type -AssemblyName System.IO.Compression
     $file = [IO.File]::Open($archive, [IO.FileMode]::Create)

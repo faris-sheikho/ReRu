@@ -1,1 +1,32 @@
+# Build output
 /target/
+
+# Runtime data created by local runs
+*.aof
+*.snap
+*.rdb
+dump.rdb
+appendonly.aof
+appendonlydir/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local environment and secrets
+.env
+.env.*
+password.txt
+*.pem
+*.key
+
+# Coverage and profiling
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.*

@@ -654,14 +654,7 @@ fn exec_keeps_running_after_a_runtime_error() {
 
 #[test]
 fn snapshot_recovers_strings_lists_streams_and_absolute_expiry() {
-    let directory = std::env::temp_dir().join(format!(
-        "reru-snapshot-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let directory = common::temp_path("reru-snapshot-test", "");
     std::fs::create_dir(&directory).unwrap();
     let path = directory.join("store.snap");
     let path_text = path.to_str().unwrap();

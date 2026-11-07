@@ -6,17 +6,10 @@ mod common;
 
 use client::{array, integer, ok, Client, Reply};
 use common::Server;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 fn path() -> std::path::PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "reru-aof-rewrite-{}-{unique}.aof",
-        std::process::id()
-    ))
+    common::temp_path("reru-aof-rewrite", ".aof")
 }
 fn bulk(bytes: &[u8]) -> Reply {
     Reply::Bulk(Some(bytes.to_vec()))

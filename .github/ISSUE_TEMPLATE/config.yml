@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/mansiverma897993/ReRu/security/advisories/new
+    about: Report a vulnerability privately. Do not open a public issue.
+  - name: Question or discussion
+    url: https://github.com/mansiverma897993/ReRu/discussions
+    about: Ask a question or discuss an idea before opening an issue.
+  - name: Redis command reference
+    url: https://redis.io/docs/latest/commands/
+    about: Check the documented Redis behavior for a command.

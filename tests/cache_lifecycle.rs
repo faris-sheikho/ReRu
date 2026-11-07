@@ -6,7 +6,7 @@ mod common;
 
 use client::{integer, ok, Client, Reply};
 use common::Server;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 fn metric(c: &mut Client, section: &[u8], name: &str) -> u64 {
     let Reply::Bulk(Some(bytes)) = c.call(&[b"INFO", section]) else {
@@ -95,12 +95,7 @@ fn expiry_invalidates_watch_and_memory_rollback_preserves_deadline() {
 #[test]
 fn idle_expiry_is_persisted_and_startup_rebuilds_deadlines() {
     for mode in ["--appendonly", "--snapshot"] {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("reru-expiry-{}-{unique}", std::process::id()));
+        let path = common::temp_path("reru-expiry", "");
         let filename = path.to_str().unwrap();
         {
             let server = Server::start_with(&[mode, filename]);

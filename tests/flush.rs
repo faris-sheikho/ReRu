@@ -6,7 +6,6 @@ mod common;
 
 use client::{array, integer, ok, queued, Client, Reply};
 use common::Server;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn flush_clears_all_types_and_invalidates_watches() {
@@ -36,11 +35,7 @@ fn flush_clears_all_types_and_invalidates_watches() {
 
 #[test]
 fn flush_executes_in_transactions_and_survives_aof_restart() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("reru-flush-{}-{unique}.aof", std::process::id()));
+    let path = common::temp_path("reru-flush", ".aof");
     let filename = path.to_str().unwrap();
     {
         let server = Server::start_with(&["--appendonly", filename]);

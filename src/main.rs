@@ -1875,7 +1875,7 @@ fn handle_client(mut stream: TcpStream, store: Store) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    const USAGE: &str = "usage: reru [--port PORT] [--snapshot FILE] [--appendonly FILE] [--dir DIR] [--dbfilename FILE] [--replicaof HOST PORT] [--requirepass PASSWORD | --requirepass-file FILE] [--masterauth PASSWORD | --masterauth-file FILE] [--maxmemory SIZE] [--maxmemory-policy POLICY] [--maxclients COUNT]";
+    const USAGE: &str = "usage: reru [--port PORT] [--bind ADDRESS] [--snapshot FILE] [--appendonly FILE] [--dir DIR] [--dbfilename FILE] [--replicaof HOST PORT] [--requirepass PASSWORD | --requirepass-file FILE] [--masterauth PASSWORD | --masterauth-file FILE] [--maxmemory SIZE] [--maxmemory-policy POLICY] [--maxclients COUNT]";
     if args.len() == 2 && matches!(args[1].as_str(), "--version" | "-V") {
         println!("ReRu {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -1885,6 +1885,7 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
     let mut port = 6379;
+    let mut bind_address = String::from("127.0.0.1");
     let mut snapshot_path = None;
     let mut aof_path = None;
     let mut rdb_dir = None;
@@ -1913,6 +1914,15 @@ fn main() -> io::Result<()> {
                 port = value.parse::<u16>().map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "--port must be a valid port")
                 })?
+            }
+            "--bind" => {
+                if value.parse::<std::net::IpAddr>().is_err() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--bind must be an IP address",
+                    ));
+                }
+                bind_address = value.to_string();
             }
             "--snapshot" => snapshot_path = Some(PathBuf::from(value)),
             "--maxclients" => {
@@ -1995,7 +2005,8 @@ fn main() -> io::Result<()> {
         ));
     }
 
-    let listener = TcpListener::bind(("127.0.0.1", port))?;
+    let listener = TcpListener::bind((bind_address.as_str(), port))?;
+    let bound = listener.local_addr()?;
     let entries = if let Some(path) = &snapshot_path {
         persistence::load(path)?
     } else if let Some(path) = &rdb_path {
@@ -2040,9 +2051,18 @@ fn main() -> io::Result<()> {
             )
         });
     }
-    eprintln!("ReRu listening on 127.0.0.1:{port}");
+    eprintln!("ReRu listening on {}:{}", bound.ip(), bound.port());
     for stream in listener.incoming() {
-        let mut stream = stream?;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            // A single aborted or resource-limited connection must not stop the
+            // listener. Back off briefly so a persistent error cannot spin.
+            Err(error) => {
+                eprintln!("accept error: {error}");
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
         let Some(permit) = store.clients.acquire() else {
             let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
             let _ = stream.write_all(b"-ERR max number of clients reached\r\n");

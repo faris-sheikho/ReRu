@@ -1,0 +1,65 @@
+name: Feature request
+description: Suggest a command, capability, or improvement
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ReRu tracks command work in [COMPATIBILITY.md](https://github.com/mansiverma897993/ReRu/blob/main/docs/COMPATIBILITY.md)
+        and [ROADMAP.md](https://github.com/mansiverma897993/ReRu/blob/main/docs/ROADMAP.md). Check those first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the use case, not only the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Commands, flags, or behavior you would like.
+    validations:
+      required: true
+  - type: textarea
+    id: redis
+    attributes:
+      label: Redis behavior
+      description: Link the Redis 8.10.2 documentation and describe any option or error case that matters.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Strings and cache
+        - Lists
+        - Hashes
+        - Sets
+        - Sorted sets
+        - Bitmaps
+        - Streams
+        - Geospatial
+        - HyperLogLog
+        - Transactions
+        - Pub/Sub
+        - Persistence
+        - Replication
+        - Authentication
+        - Connection and protocol
+        - Tooling and docs
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you like to implement it?
+      options:
+        - "Yes, I can open a pull request"
+        - "Maybe, with guidance"
+        - "No, just suggesting"
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

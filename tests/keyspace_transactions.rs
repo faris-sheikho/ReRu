@@ -270,14 +270,7 @@ fn replica_watch_tracks_same_value_writes_without_aborting_for_unrelated_keys() 
 
 #[test]
 fn keyspace_changes_survive_snapshot_restart() {
-    let directory = std::env::temp_dir().join(format!(
-        "reru-keyspace-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let directory = common::temp_path("reru-keyspace", "");
     std::fs::create_dir_all(&directory).unwrap();
     let snapshot = directory.join("data.snap");
     let path = snapshot.to_str().unwrap();

@@ -2,9 +2,14 @@
 name = "reru"
 version = "0.1.0-alpha.1"
 edition = "2021"
+rust-version = "1.88"
 description = "An experimental Redis-compatible cache and data structure server written in Rust"
 repository = "https://github.com/mansiverma897993/ReRu"
 readme = "README.md"
+license = "MIT"
+keywords = ["redis", "cache", "server", "resp", "database"]
+categories = ["database", "network-programming"]
+exclude = [".github/", "docs/*.pdf"]
 
 [dependencies]
 subtle = "=2.6.1"

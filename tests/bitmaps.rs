@@ -162,14 +162,7 @@ fn wait_for(client: &mut Client, command: &[&[u8]], expected: Reply) {
 
 #[test]
 fn sorted_sets_and_bitmaps_survive_restart_and_replicate() {
-    let directory = std::env::temp_dir().join(format!(
-        "reru-sorted-bitmap-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let directory = common::temp_path("reru-sorted-bitmap", "");
     std::fs::create_dir_all(&directory).unwrap();
     let snapshot = directory.join("data.snap");
     let path = snapshot.to_str().unwrap();

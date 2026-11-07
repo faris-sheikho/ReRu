@@ -400,14 +400,7 @@ fn replicas_receive_collections_and_watch_changes_and_reject_writes() {
 
 #[test]
 fn snapshots_restore_hashes_sets_and_their_expiry_and_deletion() {
-    let directory = std::env::temp_dir().join(format!(
-        "reru-collections-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let directory = common::temp_path("reru-collections", "");
     std::fs::create_dir_all(&directory).unwrap();
     let snapshot = directory.join("data.snap");
     let path = snapshot.to_str().unwrap();

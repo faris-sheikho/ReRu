@@ -2,54 +2,138 @@
 
 **A Redis-compatible cache and data structure server written in Rust.**
 
-ReRu implements Redis commands and persistence incrementally, with binary-safe
-RESP2 communication. The current version,
-`0.1.0-alpha.1`, is an **experimental preview**, not a production Redis replacement.
+[![CI](https://github.com/mansiverma897993/ReRu/actions/workflows/ci.yml/badge.svg)](https://github.com/mansiverma897993/ReRu/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
-[Compatibility](docs/COMPATIBILITY.md) · [Roadmap](docs/ROADMAP.md) · [Release notes](docs/RELEASE_NOTES.md)
+ReRu speaks the RESP2 protocol, so existing Redis clients connect without
+changes. It implements a growing subset of Redis commands and persistence
+formats in safe, dependency-light Rust — one small crate, one runtime
+dependency, no async executor.
+
+> **Status: experimental preview (`0.1.0-alpha.1`).** ReRu is built for
+> development, compatibility experiments, and learning. It is **not** a
+> production Redis replacement. See [Project status](#project-status).
+
+[Compatibility](docs/COMPATIBILITY.md) ·
+[Roadmap](docs/ROADMAP.md) ·
+[Architecture](docs/ARCHITECTURE.md) ·
+[Release notes](docs/RELEASE_NOTES.md) ·
+[Changelog](CHANGELOG.md)
+
+## Contents
+
+- [Why ReRu](#why-reru)
+- [Quick start](#quick-start)
+- [Connect a client](#connect-a-client)
+- [Features](#features)
+- [Server options](#server-options)
+- [Persistence](#persistence)
+- [Authentication](#authentication)
+- [Docker](#docker)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Project status](#project-status)
+- [License](#license)
+
+## Why ReRu
+
+- **Familiar protocol.** RESP2 over TCP. Use `redis-cli`, `redis-py`, `ioredis`,
+  Lettuce, or any Redis client that supports the commands listed in the
+  [compatibility inventory](docs/COMPATIBILITY.md).
+- **Small and readable.** About 21k lines of straight-line Rust with one
+  dependency. Every subsystem is a plain module with its own tests.
+- **Batteries included.** TTLs, eviction, transactions, pub/sub, streams with
+  consumer groups, persistence, replication, and geospatial queries.
+- **Research-friendly.** Each command is implemented against the pinned Redis
+  8.10.2 behavior reference, with differential tests against a live Redis where
+  possible.
 
 ## Quick start
 
-Install a current stable Rust toolchain, then build and run:
+Install a Rust toolchain (1.88 or newer), then build and run:
 
 ```sh
 git clone https://github.com/mansiverma897993/ReRu.git
 cd ReRu
 cargo build --release
-cargo run --release -- --port 6379 --maxmemory 64mb --maxmemory-policy allkeys-lru --maxclients 256
+
+./target/release/reru \
+  --port 6379 \
+  --maxmemory 64mb \
+  --maxmemory-policy allkeys-lru \
+  --maxclients 256
 ```
 
-Connect with `redis-cli` or a client configured for the supported RESP2 commands:
+The server listens on `127.0.0.1` by default and prints its startup line to
+stderr. The binary is `target/release/reru` on Unix and `target\release\reru.exe`
+on Windows. Run `reru --help` for all flags.
+
+## Connect a client
+
+Use any Redis client pointed at `127.0.0.1:6379`:
 
 ```sh
 redis-cli SET greeting "Hello from ReRu" EX 60
 redis-cli GET greeting
 redis-cli TTL greeting
+redis-cli RPUSH queue a b c
+redis-cli LRANGE queue 0 -1
 ```
 
-The server listens on `127.0.0.1` only. The compiled executable is
-`target/release/reru` on Unix or `target\release\reru.exe` on Windows.
-Run it with `--help` for startup options.
+In Python:
+
+```python
+import redis
+
+client = redis.Redis(host="127.0.0.1", port=6379)
+client.set("greeting", "Hello from ReRu", ex=60)
+print(client.get("greeting"))
+```
 
 ## Features
 
 | Area | Implemented scope |
 | --- | --- |
-| Data structures | Strings, lists, hashes, sets, sorted sets, bitmaps, streams with consumer groups and geospatial commands |
-| Approximate counting | HyperLogLog distinct counts and unions, with Redis binary-format interchange |
-| Cache behavior | Conditional writes, TTLs, background expiry, ten eviction policies and configurable memory estimates |
-| Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH` and `UNWATCH` |
-| Messaging | Local Pub/Sub, blocking reads, stream acknowledgements and pending-message recovery |
-| Persistence | ReRu snapshots, single-file AOF with background compaction, and a subset of Redis RDB |
-| Replication | Read-only ReRu replicas using a custom full-snapshot protocol |
-| Client connections | HELLO 2, SELECT 0, connection IDs/names/library metadata and RESET |
-| Operations | Client limits, runtime memory configuration and partial `INFO` metrics |
-| Authentication | Default-user passwords, `AUTH`, `ACL WHOAMI` and authenticated ReRu replication |
+| Data structures | Strings, lists, hashes, sets, sorted sets, bitmaps, streams with consumer groups, geospatial commands |
+| Approximate counting | HyperLogLog distinct counts and unions, with Redis dense/sparse binary interchange |
+| Cache behavior | Conditional writes, TTLs, background expiry, ten eviction policies, configurable memory estimates |
+| Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` |
+| Messaging | Local pub/sub, blocking reads, stream acknowledgements, pending-message recovery |
+| Persistence | ReRu snapshots, single-file AOF with background compaction, a subset of Redis RDB |
+| Replication | Read-only ReRu replicas using a snapshot-plus-stream protocol |
+| Client connections | `HELLO 2`, `SELECT 0`, connection IDs/names/library metadata, `RESET` |
+| Operations | Client limits, runtime memory configuration, partial `INFO` metrics |
+| Authentication | Default-user passwords, `AUTH`, `ACL WHOAMI`, authenticated replication |
 
 **203 of 459 command metadata entries** from Redis 8.10.2 have implementation
-paths: **44.2% command-name coverage**. This is not a measure of complete Redis
-behavior. Supported options, differences and tests are listed in the
+paths: **44.2% command-name coverage**. This counts command names, not complete
+behavior. Supported options, differences, and tests are listed in the
 [compatibility inventory](docs/COMPATIBILITY.md).
+
+## Server options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--port PORT` | `6379` | TCP port to listen on |
+| `--bind ADDRESS` | `127.0.0.1` | IP address to bind. Use `0.0.0.0` only inside a trusted network (for example a container) |
+| `--maxclients COUNT` | `10000` | Maximum concurrent client connections |
+| `--maxmemory SIZE` | `0` (unlimited) | Logical dataset memory limit, e.g. `64mb`, `1gb` |
+| `--maxmemory-policy POLICY` | `noeviction` | Eviction policy |
+| `--snapshot FILE` | off | Save and restore a ReRu snapshot |
+| `--appendonly FILE` | off | Single-file AOF with replay and manual rewrite |
+| `--dir DIR` | — | Directory for RDB files |
+| `--dbfilename FILE` | `dump.rdb` | RDB filename |
+| `--replicaof HOST PORT` | off | Run as a read-only replica |
+| `--requirepass PASSWORD` | off | Require a default-user password |
+| `--requirepass-file FILE` | off | Read the client password from a file |
+| `--masterauth PASSWORD` | off | Password for the upstream primary |
+| `--masterauth-file FILE` | off | Read the upstream password from a file |
+| `--version`, `--help` | — | Print version or usage |
+
+Eviction policies: `noeviction`, `allkeys-lru`, `allkeys-lrm`, `allkeys-lfu`,
+`allkeys-random`, `volatile-lru`, `volatile-lrm`, `volatile-lfu`,
+`volatile-random`, `volatile-ttl`.
 
 ## Persistence
 
@@ -58,53 +142,102 @@ Data stays in memory unless a persistence mode is selected. Choose one mode:
 | Startup options | Behavior |
 | --- | --- |
 | `--snapshot ./reru.snap` | Save after writes and restore at startup; ReRu-specific format |
-| `--appendonly ./reru.aof` | Append RESP transactions, fsync each batch, and replay at startup |
-| `--dir . --dbfilename dump.rdb` | Load supported Redis RDB data; save explicitly with `SAVE` or `BGSAVE` |
+| `--appendonly ./reru.aof` | Append RESP transactions, fsync each batch, replay at startup |
+| `--dir . --dbfilename dump.rdb` | Load supported Redis RDB data; save with `SAVE` or `BGSAVE` |
 
-With AOF enabled, `redis-cli BGREWRITEAOF` compacts write history in a background
-worker while preserving subsequent writes. Check `INFO persistence` for progress
-and status. Rewriting is manual; Redis multipart AOF and automatic rewrite
+With AOF enabled, `redis-cli BGREWRITEAOF` compacts write history in a
+background worker while preserving later writes. Check `INFO persistence` for
+progress. Rewriting is manual; Redis multipart AOF and automatic rewrite
 thresholds are not implemented.
 
 `--replicaof 127.0.0.1 6379 --port 6380` starts a replica. Both servers must run
-matching ReRu builds; replication is not Redis PSYNC. AOF mode cannot be combined
-with replica mode.
+matching ReRu builds; replication is not Redis `PSYNC`. AOF mode cannot be
+combined with replica mode.
 
 ## Authentication
 
-Use `--requirepass-file ./password.txt` to require the default user's password.
-Connect with `redis-cli --askpass`. Password files accept up to 4096 bytes and
-strip one trailing line ending. Replicas use `--masterauth-file ./primary-password.txt`
-to authenticate upstream; their own client password is configured separately.
-The `--requirepass` and `--masterauth` flags also accept passwords directly.
-Authentication does not encrypt traffic; TLS and multi-user ACL policies remain pending.
+Use `--requirepass-file ./password.txt` to require the default user's password,
+then connect with `redis-cli --askpass`. Password files accept up to 4096 bytes
+and strip one trailing line ending. Replicas use
+`--masterauth-file ./primary-password.txt` to authenticate upstream; their own
+client password is configured separately. `--requirepass` and `--masterauth`
+also accept passwords directly.
+
+Authentication does not encrypt traffic. TLS and multi-user ACL policies are
+still pending.
+
+## Docker
+
+```sh
+docker build -t reru .
+docker run --rm -p 6379:6379 reru
+```
+
+The image binds to `0.0.0.0` inside the container so the port mapping works.
+Keep that exposure inside a trusted network and set a password for anything
+beyond local development.
 
 ## Development
 
 ```sh
-cargo test
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo build                    # debug build
+cargo test                     # 204 tests
+cargo fmt --all -- --check     # formatting
+cargo clippy --all-targets -- -D warnings   # lints
 ```
 
-The suite contains **204 tests**, including authentication, restart, expiry, eviction,
-transaction, replication, consumer-group, HyperLogLog, connection lifecycle and AOF rewrite coverage. Five reference-dependent tests
-require `RERU_REDIS_REFERENCE_PORT` to run their Redis comparisons. Current
-interoperability checks use Redis 7.0.15; the complete Redis 8.10.2 behavior suite
-has not been validated. See the [development workflow](docs/REA_WORKFLOW.md)
-for reference-server and RDB file exchange checks.
+Reference-dependent tests compare behavior against a live Redis server and run
+only when `RERU_REDIS_REFERENCE_PORT` is set. Set it to the port of a running
+Redis instance to enable them. Interoperability checks currently use Redis
+7.0.15; the full Redis 8.10.2 behavior suite has not been validated. See
+[interoperability testing](docs/INTEROP_TESTING.md).
 
 On Windows, `powershell -File scripts/package_windows.ps1` creates a preview ZIP
 and SHA-256 checksum under `target/releases`.
 
+### Project layout
+
+```
+src/            server modules (one per subsystem)
+tests/          integration tests, one file per area
+docs/           compatibility, roadmap, architecture, testing notes
+scripts/        packaging and Redis interoperability helpers
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces fit
+together.
+
+## Contributing
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[roadmap](docs/ROADMAP.md). Good first issues are labeled
+[`good first issue`](https://github.com/mansiverma897993/ReRu/labels/good%20first%20issue).
+
+- Read the [Code of Conduct](CODE_OF_CONDUCT.md).
+- Report vulnerabilities privately per [SECURITY.md](SECURITY.md).
+- Claiming a command? Add it to the [compatibility inventory](docs/COMPATIBILITY.md)
+  and cover it with an integration test in `tests/`.
+
 ## Project status
 
 ReRu is suitable for development and compatibility experiments. Remaining work
-includes multi-user ACLs, TLS, RESP3, Lua/functions, newer stream features,
-PSYNC, clustering/failover, complete RDB/AOF compatibility and performance tuning.
-Memory limits use a logical dataset estimate, not process RSS. Commands are
-serialized and each connection uses an operating-system thread.
+includes multi-user ACLs, TLS, RESP3, Lua and functions, newer stream features,
+`PSYNC`, clustering and failover, complete RDB/AOF compatibility, and
+performance tuning. Memory limits use a logical dataset estimate, not process
+RSS. Commands are serialized, and each connection uses an operating-system
+thread.
 
-See the [roadmap](docs/ROADMAP.md) and [team implementation plan](docs/ReRu_Implementation_Plan.pdf)
-for the remaining work. Repository license selection is pending; dependency
-license notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+See the [roadmap](docs/ROADMAP.md) and
+[release notes](docs/RELEASE_NOTES.md) for details.
+
+## License
+
+ReRu is released under the [MIT License](LICENSE). Dependency license notices
+are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Acknowledgements
+
+ReRu follows the [Redis command reference](https://redis.io/docs/latest/commands/)
+and uses Redis 8.10.2 as its pinned behavior reference. Redis is a trademark of
+Redis Ltd. ReRu is an independent project and is not affiliated with or endorsed
+by Redis Ltd.

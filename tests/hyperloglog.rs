@@ -5,7 +5,7 @@ mod client;
 mod common;
 use client::{array, integer, ok, Client, Reply};
 use common::Server;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 fn bulk(value: &[u8]) -> Reply {
     Reply::Bulk(Some(value.to_vec()))
@@ -24,14 +24,7 @@ fn wait(mut condition: impl FnMut() -> bool) {
     }
 }
 fn path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "reru-hll-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    common::temp_path("reru-hll", "")
 }
 
 #[test]

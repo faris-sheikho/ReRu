@@ -466,7 +466,7 @@ quicklist2, intset, hash listpack and sorted-set listpack encodings. Without
 that variable, this reference-dependent test also skips comparisons.
 `scripts/test_rdb_interop.py` additionally creates dedicated temporary servers,
 exchanges complete RDB files in both directions, and runs `redis-check-rdb`.
-Run instructions are in [the development workflow](REA_WORKFLOW.md).
+Run instructions are in [interoperability testing](INTEROP_TESTING.md).
 
 ## Remaining major work
 

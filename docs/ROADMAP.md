@@ -1,42 +1,20 @@
 # ReRu roadmap
 
-ReRu is an incremental Rust implementation of Redis-compatible behavior. The
-first 20 CodeCrafters milestones, expanded list and set operations, initial stream commands, transactions with
-optimistic locking, initial keyspace commands, core hashes and sets, initial
-sorted sets and bitmaps, common cache-oriented string commands, and optional
-logical-memory bounds with ten eviction policies, runtime memory configuration,
-partial INFO memory/stats, keyspace and collection scans, and expiry inspection are implemented. Optional
-ReRu snapshots, basic append-only persistence, ReRu-to-ReRu replication, and
-local Pub/Sub are tested. See the
-[compatibility status](COMPATIBILITY.md) for the current command inventory.
-The latest increment adds RESP2 HELLO with inline AUTH/SETNAME, CLIENT
-ID/name/library metadata/INFO, SELECT 0 and RESET of connection state.
-It also adds HyperLogLog PFADD/PFCOUNT/PFMERGE, dense/sparse
-interchange, cached counts and persistence/replication integration.
-The preceding increment added stream consumer groups, pending-message recovery,
-XINFO diagnostics, atomic XADD trimming and group persistence/replication.
-The preceding increment added manual BGREWRITEAOF compaction with concurrent-write
-preservation, AOF status/configuration inspection, and recovery tests. It also
-adds default-user AUTH, ACL WHOAMI, password-file startup configuration and
-authenticated connections from replicas to their primary.
-The preceding increment added deadline-indexed background expiry, deletion propagation
-and persistence, configurable client limits, and client/expiry INFO metrics.
-Version 0.1.0-alpha.1 is an experimental release candidate, not production readiness.
-The preceding increment added an initial Redis RDB codec, SAVE/BGSAVE/LASTSAVE,
-DUMP/RESTORE, and full-file interoperability checks. It supports common
-collection encodings, checksums and key expiry; unsupported types fail explicitly.
-The preceding increment added sorted-set multi-key and blocking pops plus initial
-geospatial storage and search, plus single-database flush operations. Earlier
-increments added floating-point string increments, the legacy SUBSTR alias,
-server TIME, blocking list moves and
-multi-key pops, stream deletion/trimming/reverse ranges, set intersection
-cardinality, sorted-set lex ranges, bitfields and sorted-set algebra. A small
-differential suite has passed against Redis 7.0.15, including these string and
-list operations; testing against the pinned version and
-across every supported option remains pending.
-Redis 8.10.2 is the pinned compatibility reference. The current Rust code uses
-upstream documentation for behavior; a direct source-translation license has
-not been selected.
+ReRu implements Redis-compatible behavior incrementally. The current
+`0.1.0-alpha.1` preview covers strings and cache commands, lists, hashes,
+sets, sorted sets, bitmaps, HyperLogLog, geospatial queries, streams with
+consumer groups, transactions with `WATCH`, local Pub/Sub, TTLs, ten eviction
+policies, and a partial `INFO` surface.
+
+Optional persistence is in place: ReRu snapshots, a single-file AOF with
+manual background rewrite, and a subset of Redis RDB. ReRu-to-ReRu
+replication and default-user authentication are tested. RESP2 only.
+
+See the [compatibility status](COMPATIBILITY.md) for the command inventory and
+the known behavioral gaps.
+
+Redis 8.10.2 is the pinned compatibility reference. Behavior is implemented
+from upstream documentation; the project does not translate Redis source.
 
 ## Compatibility target
 

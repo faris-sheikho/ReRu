@@ -10,11 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn directory() -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("reru-rdb-{}-{unique}", std::process::id()));
+    let path = common::temp_path("reru-rdb", "");
     std::fs::create_dir(&path).unwrap();
     path
 }

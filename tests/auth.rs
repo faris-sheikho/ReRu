@@ -6,7 +6,7 @@ mod common;
 
 use client::{array, ok, queued, Client, Reply};
 use common::Server;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 fn noauth() -> Reply {
     Reply::Error(b"NOAUTH Authentication required.".to_vec())
@@ -21,11 +21,7 @@ fn bulk(bytes: &[u8]) -> Reply {
     Reply::Bulk(Some(bytes.to_vec()))
 }
 fn path() -> std::path::PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("reru-auth-{}-{unique}", std::process::id()))
+    common::temp_path("reru-auth", "")
 }
 
 #[test]
