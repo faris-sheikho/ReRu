@@ -58,6 +58,9 @@ All three must pass. Extensive changes should also run
 
 ## Do not
 
+- Copy, paste, or translate Redis source code or code from a Redis fork. ReRu is
+  a clean-room implementation; implement from documentation and observed
+  behavior only.
 - Commit secrets, generated data files (`*.aof`, `*.rdb`, `*.snap`), or
   machine-specific paths.
 - Add `Co-authored-by` or tool attribution trailers to commits.

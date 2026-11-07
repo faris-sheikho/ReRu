@@ -13,11 +13,16 @@ Because ReRu is pre-1.0, minor versions may include breaking changes.
 - `--bind ADDRESS` startup option so the server can listen on a container
   network while still defaulting to `127.0.0.1`.
 - `Dockerfile` and `.dockerignore` for container builds.
-- Open-source project scaffolding: MIT license, contributing guide, code of
+- Open-source project scaffolding: AGPL-3.0 license, contributing guide, code of
   conduct, security policy, changelog, architecture and interoperability docs,
   issue and pull request templates, and CI.
 - README banner, at-a-glance statistics, feature cards, architecture diagram,
   and social preview assets.
+
+### Changed
+
+- License changed from MIT to AGPL-3.0 before the first public release, so
+  modified versions and hosted forks must publish their source.
 
 ### Fixed
 

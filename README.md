@@ -4,7 +4,7 @@
 
 <br>
 
-[![License](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-663399?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-DEA584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-experimental-F97316?style=flat-square)](docs/ROADMAP.md)
 [![PRs](https://img.shields.io/badge/PRs-welcome-6E56CF?style=flat-square)](CONTRIBUTING.md)
@@ -302,8 +302,22 @@ See the [roadmap](docs/ROADMAP.md) and
 
 ## License
 
-ReRu is released under the [MIT License](LICENSE). Dependency license notices
-are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+ReRu is released under the
+[GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`).
+
+In plain terms:
+
+- You may use, copy, modify, and self-host ReRu.
+- If you distribute a modified version, or run one as a network service, you
+  must publish the corresponding source under the same license.
+- You may not take ReRu closed source or ship a proprietary fork.
+
+Dependency license notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Contributions are accepted under the same license; see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+Copyright (C) 2026 ReRu contributors. See [NOTICE](NOTICE) for the license
+notice.
 
 ## Acknowledgements
 

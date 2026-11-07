@@ -1,5 +1,8 @@
 # Third-party notices
 
+ReRu is licensed under AGPL-3.0-only. The dependencies below keep their own
+licenses, which are compatible with AGPL-3.0.
+
 ## subtle 2.6.1
 
 Source: https://github.com/dalek-cryptography/subtle

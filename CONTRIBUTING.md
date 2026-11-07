@@ -129,6 +129,22 @@ Group related changes in one commit. Keep unrelated refactors separate.
 
 ## License
 
-ReRu is MIT licensed. By submitting a pull request you agree that your
-contribution is licensed under the same terms. No contributor license agreement
-is required.
+ReRu is licensed under the GNU Affero General Public License v3.0
+(AGPL-3.0-only).
+
+By submitting a pull request you agree that your contribution is licensed under
+the same terms. No contributor license agreement is required.
+
+### Clean-room rule
+
+Redis is licensed under AGPLv3. ReRu must stay a clean-room implementation:
+
+- Implement behavior from the Redis documentation, the protocol specification,
+  and observed responses from a running server.
+- Do not copy Redis source code, copy from Redis forks, or translate Redis
+  source line by line.
+- Do not paste code from a language model that was asked to reproduce Redis
+  functions.
+- If you are unsure whether a reference is acceptable, ask in the issue first.
+
+This rule protects every contributor and keeps the project's license valid.
