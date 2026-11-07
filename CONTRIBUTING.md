@@ -20,6 +20,9 @@ This guide covers the workflow. By participating you agree to the
 
 If you plan a large change, open an issue first so we can agree on the design.
 
+The [open-source playbook](OSS_PLAYBOOK.md) lists the current backlog, the
+programs we take part in, and the launch plan.
+
 ## Development setup
 
 Requirements:
