@@ -21,11 +21,6 @@ It reimplements a growing slice of Redis and its persistence formats in safe, de
 
 </div>
 
-> [!WARNING]
-> **Experimental preview (`0.1.0-alpha.1`).** ReRu is built for development,
-> compatibility experiments, and learning. It is **not** a production Redis
-> replacement. See [Project status](#project-status).
-
 ## At a glance
 
 <table>
@@ -290,8 +285,8 @@ Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
 
 ## Project status
 
-ReRu is suitable for development and compatibility experiments. Remaining work
-includes multi-user ACLs, TLS, RESP3, Lua and functions, newer stream features,
+ReRu is suitable for development and compatibility experiments, not production
+use. Remaining work includes multi-user ACLs, TLS, RESP3, Lua and functions, newer stream features,
 `PSYNC`, clustering and failover, complete RDB/AOF compatibility, and
 performance tuning. Memory limits use a logical dataset estimate, not process
 RSS. Commands are serialized, and each connection uses an operating-system
