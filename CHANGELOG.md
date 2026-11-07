@@ -16,6 +16,8 @@ Because ReRu is pre-1.0, minor versions may include breaking changes.
 - Open-source project scaffolding: MIT license, contributing guide, code of
   conduct, security policy, changelog, architecture and interoperability docs,
   issue and pull request templates, and CI.
+- README banner, at-a-glance statistics, feature cards, architecture diagram,
+  and social preview assets.
 
 ### Fixed
 
