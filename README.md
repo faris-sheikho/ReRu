@@ -7,8 +7,7 @@
 [![License](https://img.shields.io/badge/license-AGPL--3.0-663399?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-DEA584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Status](https://img.shields.io/badge/status-experimental-F97316?style=flat-square)](docs/ROADMAP.md)
-[![PRs](https://img.shields.io/badge/PRs-welcome-6E56CF?style=flat-square)](CONTRIBUTING.md)
-![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-2F81F7?style=flat-square)
+![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-667085?style=flat-square)
 
 <p><b>ReRu speaks RESP2, so existing Redis clients connect without changes.</b><br>
 It reimplements a growing slice of Redis and its persistence formats in safe, dependency-light Rust.</p>
