@@ -8,6 +8,11 @@ Because ReRu is pre-1.0, minor versions may include breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Docker Compose quickstart with AOF persistence (`docker-compose.yml`),
+  documented in the README.
+
 ## [0.1.0-alpha.1] - 2026-11-07
 
 First public preview. Experimental; not a production Redis replacement.
