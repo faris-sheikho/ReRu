@@ -8,6 +8,11 @@ Because ReRu is pre-1.0, minor versions may include breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Closed blocking list, sorted-set and stream clients stop waiting promptly and
+  cannot consume later writes; client slots are released after disconnect.
+
 ## [0.1.0-alpha.1] - 2026-11-07
 
 First public preview. Experimental; not a production Redis replacement.
