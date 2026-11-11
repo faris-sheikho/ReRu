@@ -11,7 +11,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - data:/home/reru/data
     command: ["--bind", "0.0.0.0", "--port", "6379", "--appendonly", "/home/reru/data/reru.aof"]
